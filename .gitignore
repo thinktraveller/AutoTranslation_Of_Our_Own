@@ -1,0 +1,39 @@
+# 环境变量与密钥（绝对不能提交）
+.env
+*.env
+.env.*
+
+# Python 虚拟环境
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 验证脚本（临时，验证后删除）
+_verify/
+
+# 构建临时文件
+_ato3_progress.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 输出文件（可选：若不希望将译文纳入版本控制）
+# *_translated.txt
+# *_translated.md
+# *_translated.docx
