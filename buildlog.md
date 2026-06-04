@@ -97,3 +97,28 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 - 步骤 7：实现 `output_writer.py`，支持 txt / Markdown / docx 三种输出格式，并在 txt 输出后插入中途暂停等待用户精校
 
 ---
+
+## [2026-06-04 23:59] 步骤 7 完成：输出模块（txt / Markdown / docx）
+
+### 执行的任务
+- 完整实现 `output_writer.py`，提供 txt / Markdown / docx 三种输出格式
+- 实现 `_safe_stem()`：将输入文件名主干强制转换为纯 ASCII，中文等非 ASCII 字符全部移除，结果为空时回退为 `work`，从根源消除 Windows 编码风险
+- 实现 `get_output_paths()`：输出文件与输入文件同目录，文件名格式为 `{ASCII主干}_translated.{ext}`
+- 实现 `write_txt()`：仅输出正文译文，段落间空行分隔，强制 UTF-8 编码写入
+- 实现 `pause_for_proofread()`：中途暂停等待用户精校 txt，读取精校结果后返回段落列表
+- 实现 `write_markdown()`：输出包含标签、摘要、前言备注、精校正文、尾注的完整结构，支持传入精校段落列表覆盖正文
+- 实现 `write_docx()`：通过 `subprocess` 调用 pandoc，使用 `cwd=文件所在目录 + 纯文件名` 规避 Windows 路径编码问题；pandoc 未安装时输出明确提示
+- 实现 `write_all()`：串联完整三步输出流程，含段落数不匹配时的用户确认逻辑；`skip_pause=True` 可跳过精校暂停（用于测试）
+- 创建验证脚本 `_verify/step07_check_output_writer.py`（8 类检查共 15 项，使用临时目录，无副作用），验证全部通过
+
+### 关键变更
+- `output_writer.py`：输出模块，`write_all()` 为对外主接口，文件名强制 ASCII 安全
+- `_verify/step07_check_output_writer.py`：步骤 7 验证脚本，验证通过后已删除，不纳入 git
+
+### 遇到的问题及解决方案
+- 无
+
+### 下一步计划
+- 步骤 8：实现 `main.py`，将所有模块串联为完整 CLI 工具，支持参数解析、断点续传、进度提示
+
+---
