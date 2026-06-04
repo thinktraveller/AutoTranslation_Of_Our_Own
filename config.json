@@ -1,0 +1,29 @@
+{
+  "providers": {
+    "openai": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY"
+    },
+    "deepseek": {
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key_env": "DEEPSEEK_API_KEY"
+    }
+  },
+  "agents": {
+    "term_extractor": {
+      "provider": "deepseek",
+      "model": "deepseek-chat",
+      "temperature": 0.1
+    },
+    "translator": {
+      "provider": "deepseek",
+      "model": "deepseek-chat",
+      "temperature": 0.3
+    },
+    "polisher": {
+      "provider": "openai",
+      "model": "gpt-4o",
+      "temperature": 0.7
+    }
+  }
+}

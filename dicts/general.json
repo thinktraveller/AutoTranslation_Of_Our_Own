@@ -1,0 +1,29 @@
+{
+  "meta": {
+    "name": "通用词典",
+    "version": "1.0",
+    "updated": "2026-06-04"
+  },
+  "terms": {
+    "Archive of Our Own": "AO3",
+    "kudos": "点赞",
+    "bookmarks": "收藏",
+    "fanfic": "同人文",
+    "fanfiction": "同人文",
+    "ship": "配对",
+    "OTP": "真命天子配对",
+    "canon": "原著",
+    "AU": "架空世界",
+    "alternate universe": "架空世界",
+    "headcanon": "个人设定",
+    "lemon": "限制级内容",
+    "smut": "色情内容",
+    "fluff": "甜文",
+    "angst": "虐文",
+    "hurt/comfort": "虐慰",
+    "one-shot": "短篇",
+    "multi-chapter": "多章节",
+    "WIP": "未完结",
+    "work in progress": "未完结"
+  }
+}
