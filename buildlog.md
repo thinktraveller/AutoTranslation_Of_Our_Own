@@ -122,3 +122,26 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 - 步骤 8：实现 `main.py`，将所有模块串联为完整 CLI 工具，支持参数解析、断点续传、进度提示
 
 ---
+
+## [2026-06-05 00:29] 步骤 8 完成：主流程入口与整体集成（main.py）
+
+### 执行的任务
+- 完整实现 `main.py`，将 html_parser / dict_manager / term_extractor / translator / polisher / output_writer 六个模块串联为完整 CLI 工具
+- 实现 8 步进度编号（含 --skip-* 参数时自动缩减总步骤数）
+- 实现词典自动推断：未指定 `--ip-dict` 时按输入文件名的 ASCII 词干在 `dicts/ip/` 下查找或新建
+- 实现断点续传：正文翻译使用 `{stem}_progress.json` 持久化，完成后自动清理
+- 实现漏译校验：翻译完成后调用 `verify_terms()` 打印警告
+- 实现完成摘要：输出三个文件路径、正文段落数、使用术语数
+- 创建验证脚本 `_verify/step08_check_main.py`（5 类检查共 12 项，mock LLM 调用），全部通过后已删除
+
+### 关键变更
+- `main.py`：主流程入口，`main()` 为对外接口，`python main.py <html> [选项]` 可直接使用
+
+### 遇到的问题及解决方案
+1. **`global (...)` 括号语法错误**：Python 的 `global` 语句不支持括号跨行写法，改为多条 `global` 语句后仍存在根本问题——`_import_modules()` 在 `main()` 内重新绑定模块名，覆盖了测试 mock。最终删除延迟导入函数，改为顶层直接 `import`，mock 可正常拦截。
+2. **测试 HTML 标题选择器不匹配**：验证脚本的 `TEST_HTML` 缺少 `<div class="meta">` 包装，`html_parser.py` 使用 `.meta h1` 选择器故无法解析标题。在测试 HTML 中补充该包装后断言通过。
+
+### 下一步计划
+- ✅ 所有构建步骤已全部完成（步骤 1-8）
+
+---
