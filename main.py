@@ -1,8 +1,11 @@
 """
 main.py — ATO3 主流程入口
 
-用法：
+用法（CLI 模式）：
     python main.py <html_file> [选项]
+
+用法（交互式模式）：
+    python main.py          （不带任何参数，引导逐步输入）
 
 选项：
     --source-lang LANG      源语言（默认：en，目前仅用于提示词，不影响流程）
@@ -109,9 +112,71 @@ def _parse_args(argv=None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+# ── 交互式输入 ────────────────────────────────────────────────────────────
+
+def _interactive_input() -> list[str]:
+    """
+    引导用户逐步输入参数，返回等价的 argv 列表供 argparse 解析。
+    仅在 main() 检测到无命令行参数时调用。
+    """
+    print()
+    print('=' * 60)
+    print('  ATO3 交互式启动')
+    print('  （带参数运行可跳过此流程：python main.py <file> [选项]）')
+    print('=' * 60)
+    print()
+
+    argv: list[str] = []
+
+    # 1. HTML 文件路径（必填，循环直到有效）
+    while True:
+        try:
+            raw = input('请输入 AO3 HTML 文件路径：').strip().strip('"').strip("'")
+        except EOFError:
+            print('\n[错误] 交互模式需要终端环境，请改用命令行参数：')
+            print('  python main.py <html_file> [选项]')
+            sys.exit(1)
+        if not raw:
+            print('  路径不能为空，请重新输入。')
+            continue
+        if not Path(raw).exists():
+            print(f'  文件不存在：{raw}')
+            print('  请检查路径后重新输入（支持粘贴带引号的路径）。')
+            continue
+        argv.append(raw)
+        break
+
+    # 2. 是否跳过术语提取
+    skip_extract = input('跳过术语提取？直接使用现有词典 (y/N): ').strip().lower()
+    if skip_extract == 'y':
+        argv.append('--skip-term-extract')
+
+    # 3. 是否跳过润色
+    skip_polish = input('跳过润色步骤？(y/N): ').strip().lower()
+    if skip_polish == 'y':
+        argv.append('--skip-polish')
+
+    # 4. IP 词典路径（可选）
+    ip_dict = input('IP 词典路径（回车自动按文件名推断）：').strip().strip('"').strip("'")
+    if ip_dict:
+        argv.extend(['--ip-dict', ip_dict])
+
+    # 5. 是否禁用通用词典
+    no_general = input('禁用通用词典？(y/N): ').strip().lower()
+    if no_general == 'y':
+        argv.append('--no-general-dict')
+
+    print()
+    print(f'等价命令：python main.py {" ".join(argv)}')
+    print()
+    return argv
+
+
 # ── 主流程 ────────────────────────────────────────────────────────────────
 
 def main(argv=None) -> int:
+    if argv is None and len(sys.argv) == 1:
+        argv = _interactive_input()
     args = _parse_args(argv)
 
     # ── 步骤计数 ──────────────────────────────────────────────────────────
