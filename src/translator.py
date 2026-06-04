@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 
 # get_client 在模块顶层引用，使 patch("translator.get_client") 生效。
 try:
-    from llm_config import get_client
+    from .llm_config import get_client
 except ImportError:
     get_client = None  # type: ignore[assignment]
 

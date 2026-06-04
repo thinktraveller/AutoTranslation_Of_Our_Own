@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 # get_client 在模块顶层引用，使 patch("term_extractor.get_client") 生效。
 # 若 llm_config 或 openai SDK 未安装，延迟到实际调用时再报错。
 try:
-    from llm_config import get_client
+    from .llm_config import get_client
 except ImportError:
     get_client = None  # type: ignore[assignment]
 

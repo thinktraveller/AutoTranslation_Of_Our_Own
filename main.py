@@ -31,12 +31,12 @@ if sys.platform == 'win32':
         pass  # Python < 3.7 fallback，实际不影响 3.10+
 
 
-from html_parser import parse_ao3_html
-from dict_manager import load_dict, save_dict, merge_dicts
-from term_extractor import extract_and_confirm
-from translator import translate_work, verify_terms, save_progress, load_progress
-from polisher import polish_work
-from output_writer import write_all, get_output_paths, _safe_stem
+from src.html_parser import parse_ao3_html
+from src.dict_manager import load_dict, save_dict, merge_dicts
+from src.term_extractor import extract_and_confirm
+from src.translator import translate_work, verify_terms, save_progress, load_progress
+from src.polisher import polish_work
+from src.output_writer import write_all, get_output_paths, _safe_stem
 
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────

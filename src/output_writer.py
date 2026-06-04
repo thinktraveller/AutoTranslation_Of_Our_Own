@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from html_parser import ParsedWork
+from .html_parser import ParsedWork
 
 
 # ---------------------------------------------------------------------------

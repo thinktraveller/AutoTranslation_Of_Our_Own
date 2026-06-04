@@ -146,6 +146,32 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 ---
 
+## [2026-06-05 00:51] 步骤 9 完成：子模块迁移至 src/ 目录
+
+### 执行的任务
+- 创建 `src/` 目录及 `src/__init__.py`
+- `git mv` 将 7 个业务子模块从根目录迁移至 `src/`（html_parser / term_extractor / translator / polisher / output_writer / llm_config / dict_manager）
+- 修复 src/ 内 4 个模块的跨模块 import（改为相对导入 `.llm_config`、`.html_parser`）
+- 修复 `src/llm_config.py`：`Path(__file__).parent` → `.parent.parent`（PROJECT_ROOT 重新指向项目根）
+- 修复 `src/dict_manager.py`：同上修复 DICTS_DIR、IP_DIR 及 relative_to 路径
+- 更新 `main.py` 全部 import 为 `from src.xxx import`
+- 在根目录创建 `llm_config.py` 和 `dict_manager.py` 转发 stub，保持 `python llm_config.py` / `python dict_manager.py` 向下兼容
+
+### 关键变更
+- `src/__init__.py`：新建，标记 src 为 Python 包
+- `src/html_parser.py` / `src/term_extractor.py` / `src/translator.py` / `src/polisher.py` / `src/output_writer.py` / `src/llm_config.py` / `src/dict_manager.py`：7 个子模块迁入，含 import 与路径修复
+- `main.py`：6 处 import 改为 `from src.xxx import`
+- `llm_config.py`（根目录）：转发 stub，`if __name__ == '__main__': run_cli()`
+- `dict_manager.py`（根目录）：转发 stub，同上
+
+### 遇到的问题及解决方案
+- 无
+
+### 下一步计划
+- 步骤 10：为 main.py 添加交互式输入模式（无参数时引导用户逐步输入 HTML 路径及选项）
+
+---
+
 ## [2026-06-05 00:39] 🎉 项目构建完成
 
 ### 完成情况
