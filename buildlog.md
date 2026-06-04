@@ -48,48 +48,27 @@
 
 ---
 
-## [2026-06-04 22:37] 步骤 3 完成：词典管理模块
+## [2026-06-04 23:01] 修复：验证脚本 sys.path 配置缺失导致 No module named 'translator'
 
-### 执行的任务
-- 完整实现 `dict_manager.py`，提供程序内调用 API 与独立 CLI 编辑器
-- 程序内 API：`load_dict(path)`、`save_dict(path, data)`（原子替换写入）、`merge_dicts(general, ip)`（IP 优先级高于通用词典）、`list_dicts()`、`create_ip_dict(name, display_name)`
-- CLI 编辑器（`python dict_manager.py`）：主菜单列出所有词典，支持选择词典后进入子菜单（查看/添加/删除词条、批量迁移），以及创建新 IP 词典
-- 批量迁移实现复制/移动两种模式，冲突时询问用户是否覆盖，移动模式二次确认后清空源词典
-- 原子写入：先写同目录临时文件，再通过 `os.replace` 原子替换，防止写入中途崩溃损坏词典
-- 创建并运行 `_verify/step03_check_dict_manager.py`，10 项检查全部通过（0 错误）
+### 问题描述
+- 现象：运行 `_verify/step05_check_translator.py` 时报错 `ModuleNotFoundError: No module named 'translator'`，无法完成步骤 5 的验证
+- 影响范围：步骤 5 验证流程；translator.py 本身功能不受影响
 
-### 关键变更
-- `dict_manager.py`：核心词典管理模块，`load_dict` / `save_dict` / `merge_dicts` 为对外主 API，`run_cli()` 为 CLI 编辑器入口
+### 根本原因
+验证脚本 `_verify/step05_check_translator.py` 未在脚本顶部添加 `sys.path` 配置，导致 Python 解释器在 `_verify/` 子目录中运行时找不到项目根目录下的 `translator` 模块。其他验证脚本（step01~step04）存在相同的路径处理方式，但本脚本遗漏了该配置。
 
-### 遇到的问题及解决方案
-- 无
+### 修复方案
+在 `_verify/step05_check_translator.py` 顶部添加以下代码，将项目根目录插入 `sys.path`：
+```python
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+```
+此方案与其他验证脚本保持一致，不修改 translator.py 或任何生产代码。
 
-### 下一步计划
-- 步骤 4：实现 `term_extractor.py`，调用 LLM 提取术语，并实现 CLI 逐条确认流程
+### 变更文件
+- `_verify/step05_check_translator.py`：顶部添加 sys.path 配置，使脚本能正确导入项目根目录模块
 
----
-
-## [2026-06-04 22:45] 步骤 4 完成：术语提取 agent 与 CLI 确认流程
-
-### 执行的任务
-- 完整实现 `term_extractor.py`，包含术语提取、CLI 确认、整合三大功能
-- `ExtractedTerm` 数据类：original / suggested_translation / note 三个字段
-- `extract_terms(blocks, existing_terms, agent)`：调用 LLM 提取术语，自动分批（每批 ≤3000 字符），LLM 响应 JSON 解析带容错（支持纯数组、```json 代码块、前后有多余文字），已有词典词条自动跳过，大小写不敏感去重，指数退避重试（最多3次）
-- `run_cli_confirm(terms)`：逐条 CLI 确认流程，支持 y（接受）/ n（跳过）/ s（跳过剩余），接受时可直接回车使用推荐译名或输入自定义译名
-- `extract_and_confirm(blocks, existing_terms, agent)`：整合函数，供 main.py 调用，无术语时直接返回空字典
-- `_extract_json_array(text)`：从 LLM 响应中健壮提取 JSON 数组
-- `_split_into_batches(texts, char_limit)`：将文本列表分批，保证每批字符数不超限
-- 模块顶层引用 `get_client`，确保 `patch("term_extractor.get_client")` 可用于单测
-- 提供 `python term_extractor.py <html_path>` CLI 快速测试入口
-- 创建并运行 `_verify/step04_check_term_extractor.py`，36 项检查全部通过（0 错误）
-
-### 关键变更
-- `term_extractor.py`：核心模块，`extract_terms` / `run_cli_confirm` / `extract_and_confirm` 为对外主 API
-
-### 遇到的问题及解决方案
-- `patch("term_extractor.get_client")` 失败：因 `get_client` 通过函数内局部 import 导入，不在模块命名空间中。解决方案：改为模块顶层 import，失败时赋值 None，调用时再检查。
-
-### 下一步计划
-- 步骤 5：实现 `translator.py`，基于合并词典对文本块分批翻译，带词典约束校验与指数退避重试
+### 验证方法
+运行 `python _verify/step05_check_translator.py`，全部检查项通过（用户已确认验证通过）
 
 ---
