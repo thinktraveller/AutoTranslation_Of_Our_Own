@@ -68,3 +68,28 @@
 - 步骤 4：实现 `term_extractor.py`，调用 LLM 提取术语，并实现 CLI 逐条确认流程
 
 ---
+
+## [2026-06-04 22:45] 步骤 4 完成：术语提取 agent 与 CLI 确认流程
+
+### 执行的任务
+- 完整实现 `term_extractor.py`，包含术语提取、CLI 确认、整合三大功能
+- `ExtractedTerm` 数据类：original / suggested_translation / note 三个字段
+- `extract_terms(blocks, existing_terms, agent)`：调用 LLM 提取术语，自动分批（每批 ≤3000 字符），LLM 响应 JSON 解析带容错（支持纯数组、```json 代码块、前后有多余文字），已有词典词条自动跳过，大小写不敏感去重，指数退避重试（最多3次）
+- `run_cli_confirm(terms)`：逐条 CLI 确认流程，支持 y（接受）/ n（跳过）/ s（跳过剩余），接受时可直接回车使用推荐译名或输入自定义译名
+- `extract_and_confirm(blocks, existing_terms, agent)`：整合函数，供 main.py 调用，无术语时直接返回空字典
+- `_extract_json_array(text)`：从 LLM 响应中健壮提取 JSON 数组
+- `_split_into_batches(texts, char_limit)`：将文本列表分批，保证每批字符数不超限
+- 模块顶层引用 `get_client`，确保 `patch("term_extractor.get_client")` 可用于单测
+- 提供 `python term_extractor.py <html_path>` CLI 快速测试入口
+- 创建并运行 `_verify/step04_check_term_extractor.py`，36 项检查全部通过（0 错误）
+
+### 关键变更
+- `term_extractor.py`：核心模块，`extract_terms` / `run_cli_confirm` / `extract_and_confirm` 为对外主 API
+
+### 遇到的问题及解决方案
+- `patch("term_extractor.get_client")` 失败：因 `get_client` 通过函数内局部 import 导入，不在模块命名空间中。解决方案：改为模块顶层 import，失败时赋值 None，调用时再检查。
+
+### 下一步计划
+- 步骤 5：实现 `translator.py`，基于合并词典对文本块分批翻译，带词典约束校验与指数退避重试
+
+---
