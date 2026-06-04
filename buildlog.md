@@ -24,3 +24,26 @@
 - 步骤 2：实现 html_parser.py，解析 AO3 HTML 文件，拆分结构化数据（ParsedWork、TranslatableBlock）
 
 ---
+
+## [2026-06-04 22:32] 步骤 2 完成：HTML 解析模块
+
+### 执行的任务
+- 完整实现 `html_parser.py`，支持解析 AO3 标准 HTML 文件
+- 定义 `TranslatableBlock` 和 `ParsedWork` 两个数据类
+- 实现标题、作者、标签（跳过 Stats）、摘要、前言备注、正文、尾注七个区域的解析
+- 对各区域实现容错选择器，找不到元素时打印警告而不崩溃
+- 空段落自动跳过（处理 AO3 常见 `<p> </p>` 占位行）
+- 提供 `python html_parser.py <文件路径>` CLI 诊断入口
+- 创建验证脚本 `_verify/step02_check_parser.py`（5 项检查，待用户运行后删除）
+
+### 关键变更
+- `html_parser.py`：核心解析模块，定义 `ParsedWork` / `TranslatableBlock` 数据结构，`parse_ao3_html()` 为对外主接口
+- `_verify/step02_check_parser.py`：步骤 2 验证脚本，验证通过后需删除，不纳入 git
+
+### 遇到的问题及解决方案
+- 无
+
+### 下一步计划
+- 步骤 3：实现 `dict_manager.py`，提供词典读写 API 与独立 CLI 词典编辑器
+
+---
