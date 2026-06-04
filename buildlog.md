@@ -47,3 +47,24 @@
 - 步骤 3：实现 `dict_manager.py`，提供词典读写 API 与独立 CLI 词典编辑器
 
 ---
+
+## [2026-06-04 22:37] 步骤 3 完成：词典管理模块
+
+### 执行的任务
+- 完整实现 `dict_manager.py`，提供程序内调用 API 与独立 CLI 编辑器
+- 程序内 API：`load_dict(path)`、`save_dict(path, data)`（原子替换写入）、`merge_dicts(general, ip)`（IP 优先级高于通用词典）、`list_dicts()`、`create_ip_dict(name, display_name)`
+- CLI 编辑器（`python dict_manager.py`）：主菜单列出所有词典，支持选择词典后进入子菜单（查看/添加/删除词条、批量迁移），以及创建新 IP 词典
+- 批量迁移实现复制/移动两种模式，冲突时询问用户是否覆盖，移动模式二次确认后清空源词典
+- 原子写入：先写同目录临时文件，再通过 `os.replace` 原子替换，防止写入中途崩溃损坏词典
+- 创建并运行 `_verify/step03_check_dict_manager.py`，10 项检查全部通过（0 错误）
+
+### 关键变更
+- `dict_manager.py`：核心词典管理模块，`load_dict` / `save_dict` / `merge_dicts` 为对外主 API，`run_cli()` 为 CLI 编辑器入口
+
+### 遇到的问题及解决方案
+- 无
+
+### 下一步计划
+- 步骤 4：实现 `term_extractor.py`，调用 LLM 提取术语，并实现 CLI 逐条确认流程
+
+---
