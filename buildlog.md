@@ -72,3 +72,28 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 运行 `python _verify/step05_check_translator.py`，全部检查项通过（用户已确认验证通过）
 
 ---
+
+## [2026-06-04 23:06] 步骤 6 完成：润色 agent（polisher.py）
+
+### 执行的任务
+- 完整实现 `polisher.py`，提供 `polish_blocks` 和 `polish_work` 两个公开接口
+- 实现与翻译模块相同的分批策略（每批 10 段，`BATCH_SIZE=10`）
+- 润色结果直接覆盖 `translation` 字段
+- 支持 `skip_polish=True` 参数跳过润色（对应 `--skip-polish` CLI 参数）
+- 修复逻辑顺序：先检查是否有可润色段落，再初始化 LLM 客户端（全无译文时不调用 API）
+- 带指数退避重试（最多 3 次），分隔符不匹配时自动降级为逐段润色
+- 创建验证脚本 `_verify/step06_check_polisher.py`（7 类检查共 13 项，使用 mock 客户端，无需真实 API）
+- 验证全部通过（13/13）
+
+### 关键变更
+- `polisher.py`：润色模块，`polish_work()` 为对外主接口，`skip_polish=True` 可完全跳过
+- `_verify/step06_check_polisher.py`：步骤 6 验证脚本，验证通过后需删除，不纳入 git
+
+### 遇到的问题及解决方案
+1. 验证脚本中 `nonlocal` 用于模块级变量导致 SyntaxError，改用列表（可变对象）规避。
+2. `polish_blocks` 原先在检查"是否有可润色段落"之前就调用 `get_client`，导致全无译文时 mock patch 无法拦截而报错。调整顺序：先过滤可润色块，若为空直接返回，再获取客户端。
+
+### 下一步计划
+- 步骤 7：实现 `output_writer.py`，支持 txt / Markdown / docx 三种输出格式，并在 txt 输出后插入中途暂停等待用户精校
+
+---
