@@ -419,3 +419,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 - 功能验证：含中文/日文词条的词典在 `verify_terms()` 中可正常命中，ASCII 词条行为不变
 
 ---
+
+## [2026-06-05] Bug 修复：html_parser.py 作者前缀与尾注容错
+
+### 修复的 Bug
+
+**Bug 1 — 作者名含 "by" 前缀（第 148-149 行）**
+- 问题：`div.byline` 的文本内容通常以 "by " 开头（如 "by AuthorName"），直接提取后作者名包含冗余前缀，影响元信息展示
+- 修复：提取文本后追加 `re.sub(r'^by\s+', '', author, flags=re.IGNORECASE)`，去除开头的 "by"（大小写均可）
+
+**Bug 2 — 尾注解析无容错降级（第 241-246 行）**
+- 问题：尾注区域只硬查 `blockquote.userstuff`，部分 AO3 页面使用 `div.userstuff` 或无该子元素，导致尾注静默丢失
+- 修复：找不到 `blockquote.userstuff` 时，依次尝试 `div.userstuff`，仍无则以整个 `#endnotes` 作为容器调用 `_blocks_from_userstuff()`，与正文解析策略保持一致
+
+### 关键变更
+- `src/html_parser.py`：第 150 行新增 `re.sub` 去除 "by" 前缀；第 247-250 行新增两级降级容错逻辑
+
+### 验证方法
+- 代码审查：`re` 模块已在第 9 行导入，两处修改语法正确，逻辑覆盖完整
+
+---

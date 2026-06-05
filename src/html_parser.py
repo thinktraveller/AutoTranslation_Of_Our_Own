@@ -147,6 +147,7 @@ def parse_ao3_html(html_path: str | Path) -> ParsedWork:
     # ------------------------------------------------------------------
     byline_tag = soup.select_one("div.byline")
     author = _extract_text(byline_tag) if byline_tag else "(未找到作者)"
+    author = re.sub(r'^by\s+', '', author, flags=re.IGNORECASE)
 
     # ------------------------------------------------------------------
     # 3. 标签 dd（跳过 Stats 区域）
@@ -244,6 +245,10 @@ def parse_ao3_html(html_path: str | Path) -> ParsedWork:
         endnotes_bq = endnotes_div.select_one("blockquote.userstuff")
         if endnotes_bq:
             endnotes = _blocks_from_userstuff(endnotes_bq, "endnotes", "endnote")
+        else:
+            # 降级：尝试 div.userstuff，仍无则以整个 #endnotes 为容器
+            endnotes_container = endnotes_div.select_one("div.userstuff") or endnotes_div
+            endnotes = _blocks_from_userstuff(endnotes_container, "endnotes", "endnote")
 
     # ------------------------------------------------------------------
     # 8. 原文链接（<link rel="canonical"> 或页面内指向 AO3 作品的链接）
