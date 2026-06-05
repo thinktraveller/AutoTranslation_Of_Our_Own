@@ -641,3 +641,34 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 临时注释 .env 中的 API Key 后运行 `python main.py test\<任意>.html`，应在解析 HTML 之前打印配置缺失提示并退出（exit code 1）；恢复 API Key 后正常运行。
 
 ---
+
+## [2026-06-05 17:20] 修复：IP 词典选择菜单显示与交互逻辑
+
+### 问题描述
+- 现象：交互式启动的 IP 词典菜单存在三处不符合预期的行为：(1) `[0]` 文案含"自动推断"误导用户；(2) 无法在菜单中直观看出哪个词典与当前作品最匹配；(3) 回车默认逻辑固定为"不选择"，即使有匹配词典也需手动输入编号。
+- 影响范围：交互式启动模式（`python main.py` 无参数）下的 IP 词典选择步骤。
+
+### 根本原因
+`_interactive_input()` 中 IP 词典选择菜单的构建逻辑（原第 704-723 行）写死了文案、未集成 HTML tags 匹配能力，且默认值始终为 0，与 `_infer_ip_dict()` 的匹配功能相互独立、未在菜单层复用。
+
+### 修复方案
+1. 将原 `_infer_ip_dict()` 中的纯计算逻辑（评分 + 返回最佳候选）提取为新函数 `_best_ip_dict_match(work_tags)`，无任何 I/O，供菜单和原 `_infer_ip_dict()` 复用。
+2. `_infer_ip_dict()` 改为直接调用 `_best_ip_dict_match()`，自身只保留弹确认对话逻辑（CLI 模式行为不变）。
+3. 在 `_interactive_input()` IP 词典菜单构建时：
+   - 提前调用 `parse_ao3_html()` 解析已输入的 HTML，获取 `ParsedWork.tags`；
+   - 调用 `_best_ip_dict_match()` 得到最佳匹配词典；
+   - `[0]` 文案改为"不选择IP词典"；
+   - 最佳匹配词典旁追加"（与html标签匹配）"标注；
+   - 有匹配时默认选匹配词典，无匹配时默认 0，提示行据此动态显示"默认 N"；
+   - 回车直接使用默认值，不弹额外确认。
+
+### 变更文件
+- `main.py`：
+  - 新增 `_best_ip_dict_match(work_tags)` 函数（纯评分，无 I/O）
+  - `_infer_ip_dict()` 重构：删除内联评分代码，改为调用 `_best_ip_dict_match()`
+  - `_interactive_input()` IP 词典选择段重写（约 +20 行），集成 HTML 解析和匹配标注
+
+### 验证方法
+无参数运行 `python main.py`，输入含明确 IP 标签（如蔚蓝档案/原神相关）的 HTML 路径后进入词典选择菜单，确认：(1) `[0]` 显示"不选择IP词典"；(2) 与 tags 匹配的词典行末有"（与html标签匹配）"标注；(3) 直接回车时选中该匹配词典；(4) 无匹配时回车等同选 0。
+
+---

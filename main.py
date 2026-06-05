@@ -70,6 +70,42 @@ def _auto_ip_dict_path(input_path: Path) -> Path:
     return Path(__file__).parent / 'dicts' / 'ip' / f'{stem}.json'
 
 
+def _best_ip_dict_match(work_tags: list) -> Path | None:
+    """
+    扫描 dicts/ip/ 目录，用作品的 HTML tags 文本与词典文件名做子串评分匹配，
+    返回得分最高的词典 Path，或 None（无候选词典 / 得分均为 0）。
+
+    评分逻辑：将每个词典文件名（去除扩展名后按 - _ 拆词）中的各词，
+    与所有 tag 文本（小写合并）做子串搜索，命中词越多分数越高。
+
+    此函数仅做纯计算，不产生任何 I/O。
+    """
+    ip_dir = Path(__file__).parent / 'dicts' / 'ip'
+    if not ip_dir.exists():
+        return None
+
+    candidates = sorted(ip_dir.glob('*.json'))
+    if not candidates:
+        return None
+
+    tag_text = ' '.join(
+        getattr(b, 'text', '') for b in work_tags
+    ).lower()
+
+    if not tag_text.strip():
+        return None
+
+    def _score(dict_path: Path) -> int:
+        parts = re.split(r'[-_\s]+', dict_path.stem.lower())
+        return sum(1 for part in parts if part and part in tag_text)
+
+    scored = sorted(candidates, key=_score, reverse=True)
+    best = scored[0]
+    if _score(best) == 0:
+        return None
+    return best
+
+
 def _infer_ip_dict(input_path: Path, work_tags: list) -> Path | None:
     """
     扫描 dicts/ip/ 目录，用作品的 HTML tags 文本与词典文件名做子串评分匹配，
@@ -80,37 +116,11 @@ def _infer_ip_dict(input_path: Path, work_tags: list) -> Path | None:
 
     返回用户确认使用的词典 Path，或 None（不使用推荐，回退默认推断）。
     """
-    ip_dir = Path(__file__).parent / 'dicts' / 'ip'
-    if not ip_dir.exists():
+    best = _best_ip_dict_match(work_tags)
+    if best is None:
         return None
 
-    candidates = sorted(ip_dir.glob('*.json'))
-    if not candidates:
-        return None
-
-    # 将所有 tag 文本合并为小写字符串（供子串搜索）
-    tag_text = ' '.join(
-        getattr(b, 'text', '') for b in work_tags
-    ).lower()
-
-    if not tag_text.strip():
-        return None
-
-    def _score(dict_path: Path) -> int:
-        """计算词典文件名与 tag 文本的子串匹配得分。"""
-        # 将文件名主干按常见分隔符拆分为词（如 honkai-starrail → [honkai, starrail]）
-        parts = re.split(r'[-_\s]+', dict_path.stem.lower())
-        return sum(1 for part in parts if part and part in tag_text)
-
-    scored = sorted(candidates, key=_score, reverse=True)
-    best = scored[0]
-    best_score = _score(best)
-
-    # 分数为 0 表示完全无匹配，不推荐
-    if best_score == 0:
-        return None
-
-    print(f'\n  [词典推断] 根据作品标签，推荐 IP 词典：{best.name}（匹配得分 {best_score}）')
+    print(f'\n  [词典推断] 根据作品标签，推荐 IP 词典：{best.name}')
     try:
         confirm = input('  使用该词典？[回车确认 / n 跳过使用默认推断]: ').strip().lower()
     except EOFError:
@@ -635,10 +645,12 @@ def _interactive_input() -> list[str]:
         "quality":  "全程 OpenAI GPT-4o（质量最优）",
     }
     _available_profiles: list[str] = []
+    _default_profile_name: str | None = None
     try:
         from src.llm_config import load_config as _load_cfg
         _cfg = _load_cfg()
         _deleted = set(_cfg.get("deleted_profiles", []))
+        _default_profile_name = _cfg.get("default_profile") or None
         # 未被删除的内置方案
         for _bn in _builtin_names:
             if _bn not in _deleted:
@@ -651,24 +663,37 @@ def _interactive_input() -> list[str]:
         # config.json 不可读时，退回显示全部内置方案
         _available_profiles = list(_builtin_names)
 
+    # 确定默认方案在列表中的序号（1-based）；若不在列表中则无默认序号
+    _default_idx: int | None = None
+    if _default_profile_name and _default_profile_name in _available_profiles:
+        _default_idx = _available_profiles.index(_default_profile_name) + 1
+
     print('可用模型方案：')
     _profile_map: dict[str, str] = {}
     for _i, _pname in enumerate(_available_profiles, 1):
-        _desc = _builtin_desc.get(_pname, "自定义方案")
-        print(f'  [{_i}] {_pname} - {_desc}')
+        _desc = _builtin_desc.get(_pname)
+        _default_mark = '（默认）' if _i == _default_idx else ''
+        if _desc:
+            print(f'  [{_i}] {_pname} - {_desc}{_default_mark}')
+        else:
+            print(f'  [{_i}] {_pname}{_default_mark}')
         _profile_map[str(_i)] = _pname
     _total_choices = len(_available_profiles)
-    print(f'  [{_total_choices + 1}] 使用配置文件中的 default_profile（或旧版 agents 字段）')
     print()
 
     while True:
-        _sel = input(f'请选择方案 [1-{_total_choices + 1}，默认 {_total_choices + 1}]：').strip()
-        if _sel == '' or _sel == str(_total_choices + 1):
-            break  # 不追加 --profile，由配置文件决定
+        if _default_idx is not None:
+            _sel = input(f'请选择方案 [1-{_total_choices}，默认 {_default_idx}]：').strip()
+            if _sel == '':
+                _sel = str(_default_idx)
+        else:
+            _sel = input(f'请选择方案 [1-{_total_choices}，回车不指定]：').strip()
+            if _sel == '':
+                break  # 不追加 --profile，由配置文件决定
         if _sel in _profile_map:
             argv.extend(['--profile', _profile_map[_sel]])
             break
-        print(f'  请输入 1 到 {_total_choices + 1} 之间的数字。')
+        print(f'  请输入 1 到 {_total_choices} 之间的数字。')
 
     # 3. 源语言（默认 en）
     print('  可选语言代码：en（英文）/ ja（日文）/ ko（韩文）/ fr（法文）/ de（德文）/ es（西班牙文）/ ru（俄文）')
@@ -690,13 +715,34 @@ def _interactive_input() -> list[str]:
     ip_dir = Path(__file__).parent / 'dicts' / 'ip'
     ip_json_files = sorted(ip_dir.glob('*.json')) if ip_dir.exists() else []
     if ip_json_files:
+        # 尝试解析已输入的 HTML，获取 tags 用于匹配词典
+        _html_path_for_match = Path(argv[0]) if argv else None
+        _best_match: Path | None = None
+        if _html_path_for_match and _html_path_for_match.exists():
+            try:
+                _parsed_for_match = parse_ao3_html(str(_html_path_for_match))
+                _best_match = _best_ip_dict_match(_parsed_for_match.tags)
+            except Exception:
+                pass  # 解析失败时不影响菜单，仅无标注
+
         print('  dicts/ip/ 目录下已有以下 IP 词典：')
+        print('    [0] 不选择IP词典')
         for idx, f in enumerate(ip_json_files, 1):
-            print(f'    [{idx}] {f.name}')
-        print(f'    [0] 不选择（按输入文件名自动推断）')
+            _mark = '（与html标签匹配）' if (_best_match is not None and f == _best_match) else ''
+            print(f'    [{idx}] {f.name}{_mark}')
+
+        # 确定默认选项：有匹配时默认选匹配词典，否则默认 0
+        if _best_match is not None and _best_match in ip_json_files:
+            _default_sel = str(ip_json_files.index(_best_match) + 1)
+        else:
+            _default_sel = '0'
+        _default_label = _default_sel
+
         while True:
-            sel = input(f'请选择 IP 词典编号（0-{len(ip_json_files)}，回车=0）：').strip()
-            if sel == '' or sel == '0':
+            sel = input(f'请选择 [0-{len(ip_json_files)}，默认 {_default_label}]：').strip()
+            if sel == '':
+                sel = _default_sel
+            if sel == '0':
                 break
             if sel.isdigit() and 1 <= int(sel) <= len(ip_json_files):
                 argv.extend(['--ip-dict', str(ip_json_files[int(sel) - 1])])
