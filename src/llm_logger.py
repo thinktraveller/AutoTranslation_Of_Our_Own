@@ -3,7 +3,7 @@ llm_logger.py — LLM 调用日志记录模块（JSONL 格式）
 
 功能：
   每次 LLM API 调用完成（或失败）后，将调用信息追加写入
-  项目根目录下的 llm_calls.jsonl 文件，每行一条 JSON 记录。
+  logs/llm_calls.jsonl 文件，每行一条 JSON 记录。
 
 记录字段：
   timestamp     str    ISO 8601 时间戳（UTC）
@@ -44,8 +44,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-# 日志文件路径（项目根目录 / llm_calls.jsonl）
-_LOG_PATH: Path = Path(__file__).parent.parent / "llm_calls.jsonl"
+# 日志文件路径（logs/ 子目录，与任务状态文件同级）
+_LOG_PATH: Path = Path(__file__).parent.parent / "logs" / "llm_calls.jsonl"
 
 # 写入锁，防止多线程竞争（心跳线程与主线程同时写入时）
 _write_lock = threading.Lock()
@@ -117,6 +117,7 @@ def log_call(
         }
 
         try:
+            _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with _LOG_PATH.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except OSError as e:

@@ -72,11 +72,11 @@ def write_txt(result: ParsedWork, output_path: str | Path) -> None:
 
 def pause_for_proofread(txt_path: str | Path) -> list[str]:
     """
-    中途暂停，等待用户精校 txt 文件，读取后返回段落列表。
+    提示用户精校 txt 文件路径，读取并返回段落列表（供段落数预检）。
+    实际等待用户确认由调用方的 _breakpoint_prompt_proofread 处理。
     """
-    print(f'\n[步骤完成] 正文 txt 已生成：{txt_path}')
-    print('请打开 txt 文件进行正文精校。精校完成后，按回车键继续生成 Markdown 和 docx...')
-    input()
+    print(f'\n[精校] 正文 txt 已生成：{txt_path}')
+    print('  请在编辑器中完成精校，完成后在终端输入 y 确认继续。')
     with open(txt_path, 'r', encoding='utf-8') as f:
         content = f.read()
     return [p.strip() for p in content.split('\n\n') if p.strip()]

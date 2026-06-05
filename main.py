@@ -1016,35 +1016,39 @@ def main(argv=None) -> int:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     if not args.skip_term_extract:
         step('术语提取与 CLI 确认')
-        all_blocks = work.body + work.tags + work.summary + work.notes + work.endnotes
-        try:
-            new_terms, session_terms = extract_and_confirm(
-                all_blocks, existing_terms=term_map,
-                source_lang=args.source_lang, profile=profile_cfg,
-            )
-        except KeyboardInterrupt:
-            raise  # 交给上层信号处理器
-        except Exception as e:
-            print(f'  [警告] 术语提取失败：{e}')
-            print('  继续使用现有词典翻译。')
-            new_terms = {}
-            session_terms = {}
-
-        if new_terms:
-            _save_ip_dict(ip_dict_path, ip_data, new_terms)
-            term_map.update(new_terms)
-            print(f'  词典已更新，共 {len(term_map)} 条术语可用。')
-        else:
-            print('  无新术语加入词典。')
-
-        if session_terms:
-            term_map.update(session_terms)
-            print(f'  临时术语表：{len(session_terms)} 条（仅本次翻译有效，不写入词典）。')
-
-        # ── 断点 1：术语确认后 ────────────────────────────────────────────
-        # 仅在不是从该断点恢复时显示（避免恢复时重复询问）
+        # 断点恢复时跳过 LLM 术语提取（任意断点均跳过，直接使用已有词典）
         _resuming_bp = _resume_state.get("breakpoint") if _resume_state else None
-        if _resuming_bp != _BP_AFTER_TERM_CONFIRM:
+        if _resuming_bp in (_BP_AFTER_TERM_CONFIRM, _BP_AFTER_TXT_POLISH, _BP_AFTER_MD_REVIEW):
+            print('  [跳过] 术语提取（断点恢复，保留已有词典）')
+            new_terms: dict = {}
+            session_terms: dict = {}
+        else:
+            all_blocks = work.body + work.tags + work.summary + work.notes + work.endnotes
+            try:
+                new_terms, session_terms = extract_and_confirm(
+                    all_blocks, existing_terms=term_map,
+                    source_lang=args.source_lang, profile=profile_cfg,
+                )
+            except KeyboardInterrupt:
+                raise  # 交给上层信号处理器
+            except Exception as e:
+                print(f'  [警告] 术语提取失败：{e}')
+                print('  继续使用现有词典翻译。')
+                new_terms = {}
+                session_terms = {}
+
+            if new_terms:
+                _save_ip_dict(ip_dict_path, ip_data, new_terms)
+                term_map.update(new_terms)
+                print(f'  词典已更新，共 {len(term_map)} 条术语可用。')
+            else:
+                print('  无新术语加入词典。')
+
+            if session_terms:
+                term_map.update(session_terms)
+                print(f'  临时术语表：{len(session_terms)} 条（仅本次翻译有效，不写入词典）。')
+
+            # ── 断点 1：术语确认后（仅首次运行时显示，断点恢复一律跳过）──
             task_state["cache"]["terms_log_path"] = str(task_log_dir / "terms_extracted.json")
             _save_task_state(task_state, task_log_dir)
             if not _breakpoint_prompt(

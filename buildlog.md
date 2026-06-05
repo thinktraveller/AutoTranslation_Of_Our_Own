@@ -1,5 +1,35 @@
 # 构建日志
 
+## [2026-06-05 21:11] 修复：断点续传三处问题 + llm_calls.jsonl 路径迁移
+
+### 问题描述
+- **断点续传 Bug 1**：从任意断点恢复时，`extract_and_confirm`（LLM 调用）总是重跑，导致浪费 API 调用、感觉"从头开始"
+- **断点续传 Bug 2**：正常流程 [7/8] txt 精校阶段，`pause_for_proofread` 打印过时提示"按回车键继续"并阻塞一次，之后 `_breakpoint_prompt_proofread` 再阻塞一次，用户需双重确认
+- **断点续传 Bug 3**：与 Bug 2 同理，`after_md_review` 续传时 term extraction 也重跑
+- **llm_calls.jsonl 路径**：LLM 调用日志写到项目根目录，与日志文件夹割裂
+
+### 根本原因
+1. `_resuming_bp` 的计算位于 `extract_and_confirm()` 调用之后，导致所有断点恢复都无法跳过术语提取
+2. `pause_for_proofread` 保留了旧版 `input()` 阻塞，与新版 `_breakpoint_prompt_proofread` 形成双重等待
+3. `llm_logger._LOG_PATH` 硬编码为项目根目录
+
+### 修复方案
+- `main.py`：将 `_resuming_bp` 计算移到 `extract_and_confirm` 之前；任意断点恢复时（`after_term_confirm` / `after_txt_polish` / `after_md_review`）跳过术语提取和断点提示，直接使用已有词典
+- `src/output_writer.py`：`pause_for_proofread` 去掉 `input()` 阻塞，更新提示文案；实际等待由调用方 `_breakpoint_prompt_proofread` 处理
+- `src/llm_logger.py`：`_LOG_PATH` 改为 `logs/llm_calls.jsonl`，写入前 `mkdir(parents=True, exist_ok=True)`
+
+### 变更文件
+- `main.py`：术语提取跳过逻辑重构
+- `src/output_writer.py`：`pause_for_proofread` 去除旧 `input()` 阻塞
+- `src/llm_logger.py`：日志路径迁移至 `logs/`
+
+### 验证方法
+1. 正常运行至 [4/8] 输入 s 保存，重启后选择恢复 → 应看到"[跳过] 术语提取（断点恢复）"，不发起 LLM 调用
+2. 正常运行至 [7/8] → 应只看到一次 `[精校断点]` y/s 提示，无旧版"按回车键继续"
+3. 运行后 `logs/llm_calls.jsonl` 有记录，项目根目录无 `llm_calls.jsonl`
+
+---
+
 ## [2026-06-05 19:30] 步骤 16 完成：IP 词典索引重构（remarks 频数匹配算法）
 
 ### 执行的任务
