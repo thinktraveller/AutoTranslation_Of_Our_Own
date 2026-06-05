@@ -2,7 +2,8 @@
   "meta": {
     "name": "通用词典",
     "version": "1.0",
-    "updated": "2026-06-05"
+    "updated": "2026-06-05",
+    "remarks": []
   },
   "terms": {
     "Archive of Our Own": "AO3",

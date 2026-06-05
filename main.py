@@ -70,57 +70,48 @@ def _auto_ip_dict_path(input_path: Path) -> Path:
     return Path(__file__).parent / 'dicts' / 'ip' / f'{stem}.json'
 
 
-def _best_ip_dict_match(work_tags: list) -> Path | None:
+def _best_ip_dict_match(html_full_text: str) -> Path | None:
     """
-    扫描 dicts/ip/ 目录，用作品的 HTML tags 文本与词典文件名做子串评分匹配，
-    返回得分最高的词典 Path，或 None（无候选词典 / 得分均为 0）。
+    基于 dict_index.json 中各词典的 remarks 在 HTML 全文的频数平均值，
+    推断最匹配的 IP 词典。
 
-    评分逻辑：将每个词典文件名（去除扩展名后按 - _ 拆词）中的各词，
-    与所有 tag 文本（小写合并）做子串搜索，命中词越多分数越高。
-
-    此函数仅做纯计算，不产生任何 I/O。
+    算法：
+    1. 读取 dicts/dict_index.json；若不存在返回 None。
+    2. 对每个条目，统计所有 remarks 在全文（转小写）中出现的次数，
+       除以 remarks 数量得到平均频数。
+    3. 取平均频数最高的词典；若最高值 < 1，返回 None。
+    4. 返回匹配词典的绝对 Path。
     """
-    ip_dir = Path(__file__).parent / 'dicts' / 'ip'
-    if not ip_dir.exists():
+    index_path = Path("dicts/dict_index.json")
+    if not index_path.exists():
+        return None
+    try:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+    except Exception:
         return None
 
-    candidates = sorted(ip_dir.glob('*.json'))
-    if not candidates:
-        return None
-
-    tag_text = ' '.join(
-        getattr(b, 'text', '') for b in work_tags
-    ).lower()
-
-    if not tag_text.strip():
-        return None
-
-    def _score(dict_path: Path) -> int:
-        parts = re.split(r'[-_\s]+', dict_path.stem.lower())
-        return sum(1 for part in parts if part and part in tag_text)
-
-    scored = sorted(candidates, key=_score, reverse=True)
-    best = scored[0]
-    if _score(best) == 0:
-        return None
-    return best
+    text_lower = html_full_text.lower()
+    best_path, best_score = None, 0.0
+    for rel_path, remarks in index.get("index", {}).items():
+        if not remarks:
+            continue
+        avg = sum(text_lower.count(r.lower()) for r in remarks) / len(remarks)
+        if avg > best_score:
+            best_score, best_path = avg, Path("dicts") / rel_path
+    return best_path if best_score >= 1.0 else None
 
 
-def _infer_ip_dict(input_path: Path, work_tags: list) -> Path | None:
+def _infer_ip_dict(input_path: Path, html_full_text: str) -> Path | None:
     """
-    扫描 dicts/ip/ 目录，用作品的 HTML tags 文本与词典文件名做子串评分匹配，
-    推荐最佳匹配词典并让用户确认。
-
-    评分逻辑：将每个词典文件名（去除扩展名后按 - _ 拆词）中的各词，
-    与所有 tag 文本（小写合并）做子串搜索，命中词越多分数越高。
+    基于 HTML 全文 remarks 频数统计推断最匹配的 IP 词典，并让用户确认。
 
     返回用户确认使用的词典 Path，或 None（不使用推荐，回退默认推断）。
     """
-    best = _best_ip_dict_match(work_tags)
+    best = _best_ip_dict_match(html_full_text)
     if best is None:
         return None
 
-    print(f'\n  [词典推断] 根据作品标签，推荐 IP 词典：{best.name}')
+    print(f'\n  [词典推断] 根据作品全文，推荐 IP 词典：{best.name}')
     try:
         confirm = input('  使用该词典？[回车确认 / n 跳过使用默认推断]: ').strip().lower()
     except EOFError:
@@ -715,15 +706,15 @@ def _interactive_input() -> list[str]:
     ip_dir = Path(__file__).parent / 'dicts' / 'ip'
     ip_json_files = sorted(ip_dir.glob('*.json')) if ip_dir.exists() else []
     if ip_json_files:
-        # 尝试解析已输入的 HTML，获取 tags 用于匹配词典
+        # 读取 HTML 全文用于词典匹配（直接读取原始文本，无需解析结构）
         _html_path_for_match = Path(argv[0]) if argv else None
         _best_match: Path | None = None
         if _html_path_for_match and _html_path_for_match.exists():
             try:
-                _parsed_for_match = parse_ao3_html(str(_html_path_for_match))
-                _best_match = _best_ip_dict_match(_parsed_for_match.tags)
+                _html_full_text = _html_path_for_match.read_text(encoding="utf-8", errors="replace")
+                _best_match = _best_ip_dict_match(_html_full_text)
             except Exception:
-                pass  # 解析失败时不影响菜单，仅无标注
+                pass  # 读取失败时不影响菜单，仅无标注
 
         print('  dicts/ip/ 目录下已有以下 IP 词典：')
         print('    [0] 不选择IP词典')
@@ -1003,8 +994,12 @@ def main(argv=None) -> int:
     if args.ip_dict:
         ip_dict_path = Path(args.ip_dict)
     else:
-        # 先用评分匹配询问用户是否使用已有词典
-        _inferred = _infer_ip_dict(html_path, work.tags)
+        # 读取 HTML 原文全文，用于 remarks 频数匹配
+        try:
+            _html_raw = html_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            _html_raw = ""
+        _inferred = _infer_ip_dict(html_path, _html_raw)
         ip_dict_path = _inferred if _inferred is not None else _auto_ip_dict_path(html_path)
 
     ip_data = _load_ip_dict_data(ip_dict_path)

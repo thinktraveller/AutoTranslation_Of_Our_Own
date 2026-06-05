@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "updated": "2026-06-05",
+  "index": {
+    "ip/honkai-starrail.json": ["honkai", "star rail", "trailblazer", "astral express"],
+    "ip/wutheringwaves.json": ["wuthering", "waves", "rover", "resonator"]
+  }
+}

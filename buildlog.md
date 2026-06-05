@@ -1,5 +1,53 @@
 # 构建日志
 
+## [2026-06-05 19:30] 步骤 16 完成：IP 词典索引重构（remarks 频数匹配算法）
+
+### 执行的任务
+
+**任务 1：为词典 JSON 的 meta 块补充 remarks 字段**
+- `dicts/general.json`：添加 `"remarks": []`（通用词典不参与自动推断）
+- `dicts/ip/wutheringwaves.json`：`keywords` 字段改名为 `remarks`，值更新为 `["wuthering", "waves", "rover", "resonator"]`
+- `dicts/ip/honkai-starrail.json`：`keywords` 字段改名为 `remarks`，值更新为 `["honkai", "star rail", "trailblazer", "astral express"]`
+
+**任务 2：重建 dicts/dict_index.json 为新格式**
+- 旧格式：`{"entries": [{path, name, keywords}, ...]}`
+- 新格式：`{"index": {"ip/xxx.json": ["remark1", ...], ...}}`
+- 仅收录 `dicts/ip/` 下的词典，通用词典不收录
+
+**任务 3：更新 src/dict_manager.py**
+- 删除旧的 `_rebuild_dict_index()` 函数，替换为三个新函数：
+  - `_load_dict_index()`：读取并返回索引 dict，文件不存在时返回空结构
+  - `_save_dict_index()`：原子写入索引文件
+  - `update_dict_index(dict_rel_path, remarks)`：更新或新增指定词典的 remarks 条目
+  - `remove_from_dict_index(dict_rel_path)`：从索引中移除指定词典条目
+- `save_dict()` 末尾调用从 `_rebuild_dict_index()` 改为读取 `meta.remarks` 后调用 `update_dict_index()`
+- `_menu_create_ip_dict()`：新增 remarks 询问步骤，创建后写入 meta 并同步索引
+- `_menu_dict_operations()`：IP 词典显示新增"5. 删除此词典文件"选项
+- 新增 `_menu_delete_ip_dict()`：删除词典文件并调用 `remove_from_dict_index()`
+
+**任务 4：替换 main.py 的匹配函数**
+- `_best_ip_dict_match(html_full_text: str)`：参数从 `parsed_work` 对象改为 HTML 全文字符串，读取新格式 `index` 字典（`remarks` 键），计算每个词典的 remarks 平均频数，阈值 >= 1.0 才推荐
+- `_infer_ip_dict()`：第二个参数从 `parsed_work` 改为 `html_full_text: str`
+- 交互式菜单（第 6 步 IP 词典选择）：改为直接读取 HTML 原始文本调用匹配，不再解析 DOM 结构
+- 主流程加载词典前：读取 HTML 原文后传入 `_infer_ip_dict()`
+
+### 关键变更
+- `dicts/general.json`：meta 新增 `remarks: []`
+- `dicts/ip/wutheringwaves.json`：`keywords` 改为 `remarks`，值更新
+- `dicts/ip/honkai-starrail.json`：`keywords` 改为 `remarks`，值更新
+- `dicts/dict_index.json`：结构从 entries 数组改为 index 字典
+- `src/dict_manager.py`：索引管理函数重构，CLI 新增 remarks 填写和词典删除流程
+- `main.py`：`_best_ip_dict_match` 改为接收 HTML 全文字符串，基于 dict_index.json 的 remarks 字段进行频数匹配
+
+### 遇到的问题及解决方案
+- `save_dict` 末尾仍调用已删除的 `_rebuild_dict_index`，修复为调用 `update_dict_index`
+- `_menu_delete_ip_dict` 在 `_menu_dict_operations` 中被调用但未注册菜单项，补充"5. 删除此词典文件"选项
+
+### 下一步计划
+- 步骤 16 全部子项已完成，待后续步骤安排
+
+---
+
 ## [2026-06-04 22:28] 步骤 1 完成：项目结构初始化与 LLM 配置模块
 
 ### 执行的任务
@@ -670,5 +718,53 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 ### 验证方法
 无参数运行 `python main.py`，输入含明确 IP 标签（如蔚蓝档案/原神相关）的 HTML 路径后进入词典选择菜单，确认：(1) `[0]` 显示"不选择IP词典"；(2) 与 tags 匹配的词典行末有"（与html标签匹配）"标注；(3) 直接回车时选中该匹配词典；(4) 无匹配时回车等同选 0。
+
+---
+
+## [2026-06-05 17:30] 功能改造：词典匹配策略从文件名子串改为关键词全文频数统计
+
+### 问题描述
+- 现象：IP 词典推断依赖文件名拆词子串匹配（如 `wutheringwaves` → `["wuthering","waves"]` 与 tags 比对），对文件名不直观、tags 文本有限的场景匹配率低
+- 影响范围：词典自动推断功能（`_best_ip_dict_match`）、交互式启动、CLI 词典匹配提示
+
+### 根本原因
+原算法仅从文件名拆词，信息量有限；且只对 tags 字段做子串搜索，未利用正文全文的更丰富信息。
+
+### 修复方案
+
+**改造一：词典 JSON 新增 keywords 字段**
+- `dicts/ip/wutheringwaves.json`：meta 新增 `"keywords": ["wuthering", "waves", "鸣潮"]`，name 改为 `"鸣潮词典"`
+- `dicts/ip/honkai-starrail.json`：meta 新增 `"keywords": ["honkai", "star rail", "崩坏", "星穹铁道"]`，name 改为 `"崩坏星穹铁道词典"`
+
+**改造二：新增词典关键词索引**
+- 创建 `dicts/dict_index.json`，聚合所有 IP 词典的 path / name / keywords
+- 在 `src/dict_manager.py` 中新增 `_rebuild_dict_index()` 函数，扫描 `dicts/ip/` 下所有含 `meta.keywords` 的词典自动重建索引
+- `save_dict()` 末尾添加逻辑：当保存路径在 `IP_DIR` 下时，自动调用 `_rebuild_dict_index()`（general.json 不触发）
+
+**改造三：替换 `_best_ip_dict_match()` 算法**
+- 函数签名从 `(work_tags: list)` 改为 `(parsed_work)` 接收完整 `ParsedWork` 对象
+- 新算法：读 `dict_index.json` → 拼接全文（所有 tags/summary/notes/body/endnotes 块）→ 对每词典计算 keywords 平均频数 → 取最高者（< 1 则返回 None）
+- 无 `dict_index.json` 时退化为旧文件名子串算法（向下兼容）
+- 同步更新三处调用点：`_infer_ip_dict()`、主流程 `_infer_ip_dict(html_path, work)` 调用、交互式启动 `_interactive_input()` 中的调用
+
+### 变更文件
+- `dicts/ip/wutheringwaves.json`：meta 新增 keywords，name 中文化
+- `dicts/ip/honkai-starrail.json`：meta 新增 keywords，name 中文化
+- `dicts/dict_index.json`：新建，词典关键词索引文件
+- `src/dict_manager.py`：新增 `_rebuild_dict_index()`；`save_dict()` 末尾添加自动重建逻辑
+- `main.py`：`_best_ip_dict_match()` 替换为全文频数算法；`_infer_ip_dict()` 签名更新；三处调用点同步
+
+### 验证方法
+```python
+python -c "
+from src.dict_manager import _rebuild_dict_index
+import json
+_rebuild_dict_index()
+with open('dicts/dict_index.json', encoding='utf-8') as f:
+    idx = json.load(f)
+assert len(idx['entries']) == 2
+print('dict_index 重建验证通过，条目数:', len(idx['entries']))
+"
+```
 
 ---

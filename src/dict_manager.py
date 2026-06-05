@@ -58,11 +58,80 @@ def load_dict(path: str | Path) -> dict[str, Any]:
     return data
 
 
+def _load_dict_index() -> dict:
+    """
+    读取 dicts/dict_index.json，返回完整的索引 dict。
+    若文件不存在或解析失败，返回空结构。
+    """
+    index_path = DICTS_DIR / "dict_index.json"
+    if not index_path.exists():
+        return {"version": 1, "updated": str(date.today()), "index": {}}
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if "index" not in data:
+            data["index"] = {}
+        return data
+    except Exception:
+        return {"version": 1, "updated": str(date.today()), "index": {}}
+
+
+def _save_dict_index(index_data: dict) -> None:
+    """
+    原子写入 dicts/dict_index.json（先写临时文件再替换）。
+    写入失败静默忽略，不影响词典保存流程。
+    """
+    index_path = DICTS_DIR / "dict_index.json"
+    index_data["updated"] = str(date.today())
+    try:
+        tmp_fd, tmp_path_str = tempfile.mkstemp(
+            dir=DICTS_DIR, prefix=".tmp_index_", suffix=".json"
+        )
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                json.dump(index_data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path_str, index_path)
+        except Exception:
+            try:
+                os.unlink(tmp_path_str)
+            except OSError:
+                pass
+    except Exception:
+        pass  # 索引写入失败不影响主流程
+
+
+def update_dict_index(dict_rel_path: str, remarks: list) -> None:
+    """
+    在 dicts/dict_index.json 中更新或新增指定词典的 remarks。
+
+    dict_rel_path : 相对于 dicts/ 目录的路径，如 "ip/wutheringwaves.json"
+    remarks       : 关键识别词列表，如 ["wuthering", "waves", "rover"]
+
+    若 remarks 为空列表，将该条目的 remarks 设为空列表（保留条目）。
+    """
+    index_data = _load_dict_index()
+    index_data["index"][dict_rel_path] = list(remarks)
+    _save_dict_index(index_data)
+
+
+def remove_from_dict_index(dict_rel_path: str) -> None:
+    """
+    从 dicts/dict_index.json 中移除指定词典的条目。
+
+    dict_rel_path : 相对于 dicts/ 目录的路径，如 "ip/wutheringwaves.json"
+    若条目不存在，静默忽略。
+    """
+    index_data = _load_dict_index()
+    index_data["index"].pop(dict_rel_path, None)
+    _save_dict_index(index_data)
+
+
 def save_dict(path: str | Path, data: dict[str, Any]) -> None:
     """
     将词典数据安全写入 JSON 文件（先写临时文件再原子替换）。
 
     自动更新 meta.updated 为今日日期。
+    若保存的是 IP 词典（位于 dicts/ip/ 目录下），自动重建 dicts/dict_index.json。
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,6 +157,15 @@ def save_dict(path: str | Path, data: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+
+    # IP 词典保存后自动同步索引（general.json 不在 IP_DIR 内，不触发）
+    if path.parent.resolve() == IP_DIR.resolve():
+        try:
+            remarks = data.get("meta", {}).get("remarks", [])
+            rel_path = "ip/" + path.name
+            update_dict_index(rel_path, remarks)
+        except Exception:
+            pass  # 索引同步失败不影响词典保存流程
 
 
 def merge_dicts(
@@ -376,12 +454,15 @@ def _menu_migrate_terms(src_path: Path, src_data: dict) -> None:
 def _menu_dict_operations(path: Path, data: dict) -> None:
     """单个词典的操作子菜单。"""
     name = data["meta"].get("name", path.stem)
+    _is_ip_dict = path.parent.resolve() == IP_DIR.resolve()
     while True:
         _print_header(f"操作词典：{name}")
         print("  1. 查看所有词条")
         print("  2. 添加词条")
         print("  3. 删除词条")
         print("  4. 批量迁移词条到其他词典")
+        if _is_ip_dict:
+            print("  5. 删除此词典文件")
         print("  0. 返回主菜单")
 
         choice = _prompt("\n请选择操作")
@@ -397,14 +478,57 @@ def _menu_dict_operations(path: Path, data: dict) -> None:
         elif choice == "4":
             _menu_migrate_terms(path, data)
             data = load_dict(path)
+        elif choice == "5" and _is_ip_dict:
+            deleted = _menu_delete_ip_dict(path, data)
+            if deleted:
+                break  # 词典已删除，退出子菜单
         elif choice == "0":
             break
         else:
             print("  无效选项，请重新输入。")
 
 
+def _menu_delete_ip_dict(path: Path, data: dict) -> bool:
+    """
+    删除整个 IP 词典文件，并从 dict_index.json 中移除对应条目。
+    返回 True 表示已删除（调用方应退出词典操作子菜单），False 表示取消。
+    仅允许删除 IP_DIR 内的词典，不允许删除通用词典。
+    """
+    if path.parent.resolve() != IP_DIR.resolve():
+        print("  通用词典不允许删除。")
+        _pause()
+        return False
+
+    name = data["meta"].get("name", path.stem)
+    _print_header(f"删除词典：{name}")
+    print(f"  文件路径：{path}")
+    print(f"  包含词条：{len(data.get('terms', {}))} 条")
+    print()
+    confirm = _prompt("确认删除？此操作不可撤销 (y/n)", "n").lower()
+    if confirm != "y":
+        print("  已取消。")
+        _pause()
+        return False
+
+    # 从索引中移除
+    rel_path = "ip/" + path.name
+    remove_from_dict_index(rel_path)
+
+    # 删除文件
+    try:
+        path.unlink()
+        print(f"  已删除词典：{path}")
+    except Exception as e:
+        print(f"  删除文件失败：{e}")
+        _pause()
+        return False
+
+    _pause()
+    return True
+
+
 def _menu_create_ip_dict() -> None:
-    """创建新 IP 词典。"""
+    """创建新 IP 词典，并在 dict_index.json 中注册 remarks。"""
     _print_header("创建新 IP 词典")
     name = _prompt("请输入文件名（英文，不含 .json，如 harry_potter）")
     if not name:
@@ -415,10 +539,25 @@ def _menu_create_ip_dict() -> None:
     if not re.match(r"^[\w\-]+$", name):
         print("  文件名只能包含字母、数字、下划线和连字符。")
         return
-    display = _prompt(f"请输入词典显示名称", name)
+    display = _prompt("请输入词典显示名称", name)
+    print("  请输入关键识别词（remarks），用于自动推断此词典，多个词用英文逗号分隔。")
+    print("  示例：harry, potter, hogwarts, hermione")
+    remarks_raw = _prompt("关键识别词（回车跳过，后续可在词典文件中手动填写）", "")
+    remarks: list[str] = []
+    if remarks_raw:
+        remarks = [r.strip() for r in remarks_raw.split(",") if r.strip()]
+
     try:
         path = create_ip_dict(name, display)
+        # 将 remarks 写入词典 meta 并更新索引
+        dict_data = load_dict(path)
+        dict_data["meta"]["remarks"] = remarks
+        save_dict(path, dict_data)  # save_dict 会自动调用 update_dict_index
         print(f"  已创建：{path}")
+        if remarks:
+            print(f"  已注册 remarks：{remarks}")
+        else:
+            print("  未设置 remarks（词典不会参与自动推断，可后续手动添加）。")
     except FileExistsError as e:
         print(f"  {e}")
     _pause()
