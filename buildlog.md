@@ -309,6 +309,32 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 ---
 
+## [2026-06-05 11:06] 修复：verify_terms() \b 不兼容非 ASCII 字符 & main.py Pylance reconfigure 类型报错
+
+### 问题描述
+- **问题 1**：`verify_terms()` 对所有词典原文统一使用 `\b` 单词边界，导致对日文、韩文、法文等全非 ASCII 词汇的漏译校验永远无法命中（`\b` 依赖 ASCII `\w` 定义，两个非 ASCII 字符之间不存在词边界），校验结果静默失效。
+- **问题 2 & 3**：`main.py` 第 33-34 行直接在 `sys.stdout` / `sys.stderr` 上调用 `.reconfigure()`，Pylance 报「属性 "reconfigure" 未知」——`sys.stdout` 的静态类型为 `TextIO`（`typing` 模块），该接口未声明 `reconfigure`，运行时实际类型 `io.TextIOWrapper` 有该方法但静态检查不认。
+- 影响范围：问题 1 影响所有非英文原文词典的漏译校验；问题 2 & 3 影响 Pylance 类型检查，运行时无影响。
+
+### 根本原因
+- **问题 1**：`re` 的 `\b` 边界基于 ASCII 字符集的 `\w` 定义，无法识别 Unicode 非 ASCII 字符之间的边界，对全非 ASCII 词汇的搜索模式形同 `.*\b.*`，永远不匹配。
+- **问题 2 & 3**：`typing.TextIO` 是最小化 IO 协议接口，不包含 `io.TextIOWrapper` 特有的 `reconfigure` 方法，Pylance 按静态类型检查时报告属性缺失。
+
+### 修复方案
+- **问题 1**：在 `verify_terms()` 中，对 `orig` 做字符检测：若去除空格后全部为非 ASCII 字符（`ord(c) > 127`），则不加 `\b` 边界，直接使用 `re.escape(orig_lower)`；含 ASCII 字符的词汇保留原 `\b` 边界防止误报。
+- **问题 2 & 3**：在 `main.py` 新增 `import io` 和 `from typing import cast`；将 `try/except` 块改为 `hasattr` 守卫（`if hasattr(sys.stdout, 'reconfigure')`），并通过 `cast(io.TextIOWrapper, sys.stdout).reconfigure(...)` 显式告知 Pylance 实际类型，消除静态报错，运行时行为不变。
+
+### 变更文件
+- `src/translator.py`：`verify_terms()` 函数，第 580-582 行，添加非 ASCII 词汇的 `\b` 绕过逻辑
+- `main.py`：新增 `import io` 和 `from typing import cast`，Windows UTF-8 块改为 `hasattr` 守卫 + `cast` 调用
+
+### 验证方法
+- `python -c "import ast; ast.parse(open('src/translator.py', encoding='utf-8').read())"` 无报错
+- `python -c "import ast; ast.parse(open('main.py', encoding='utf-8').read())"` 无报错
+- 逻辑验证：`all(ord(c) > 127 for c in '日文词'.replace(' ', ''))` 为 True，走无边界路径；`all(ord(c) > 127 for c in 'Harry'.replace(' ', ''))` 为 False，走 `\b` 路径
+
+---
+
 ## [2026-06-05] 步骤 12 完成：调用日志、超时报错、断点续翻、批次心跳
 
 ### 执行的任务

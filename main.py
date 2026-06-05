@@ -19,21 +19,22 @@ main.py — ATO3 主流程入口
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
 import signal
 import sys
 from pathlib import Path
+from typing import cast
 
 # ── Windows UTF-8 模式（必须在其他导入前设置）──────────────────────────────
 if sys.platform == 'win32':
     os.environ.setdefault('PYTHONUTF8', '1')
-    try:
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-    except AttributeError:
-        pass  # Python < 3.7 fallback，实际不影响 3.10+
+    if hasattr(sys.stdout, 'reconfigure'):
+        cast(io.TextIOWrapper, sys.stdout).reconfigure(encoding='utf-8', errors='replace')
+    if hasattr(sys.stderr, 'reconfigure'):
+        cast(io.TextIOWrapper, sys.stderr).reconfigure(encoding='utf-8', errors='replace')
 
 
 from src.html_parser import parse_ao3_html

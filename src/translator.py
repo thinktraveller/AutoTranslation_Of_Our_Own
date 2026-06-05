@@ -578,7 +578,13 @@ def verify_terms(
             if len(orig) <= 2:
                 continue
             # 大小写不敏感的全词匹配
-            pattern = r"\b" + re.escape(orig.lower()) + r"\b"
+            # 若词汇全部由非 ASCII 字符组成（日/韩/法文等），\b 无法识别其边界，
+            # 直接用 re.escape 不加边界；含 ASCII 字符的词汇保留 \b 避免误报。
+            orig_lower = orig.lower()
+            if all(ord(c) > 127 for c in orig_lower.replace(" ", "")):
+                pattern = re.escape(orig_lower)
+            else:
+                pattern = r"\b" + re.escape(orig_lower) + r"\b"
             if re.search(pattern, translation_lower):
                 warnings.append(
                     f"[漏译警告] 块 {block.block_id!r}：词典术语 {orig!r} 未被翻译为 {trans!r}，"
