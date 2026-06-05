@@ -320,6 +320,7 @@ def extract_terms(
     existing_terms: dict[str, str] | None = None,
     agent: str = "term_extractor",
     source_lang: str = "en",
+    profile: dict | None = None,
 ) -> list[ExtractedTerm]:
     """
     对文本块列表调用 LLM 进行术语提取。
@@ -330,6 +331,8 @@ def extract_terms(
     existing_terms: 已有词典映射 {原文: 译文}，已存在的词条自动跳过
     agent         : 使用的 agent 名称（对应 config.json 中的配置）
     source_lang   : 源语言代码（如 "en"、"ja"），用于提示词中描述源文语言
+    profile       : 由 get_profile_config() 返回的方案配置字典（可选）。
+                    不为 None 时优先从方案中取 agent 配置，否则沿用旧版逻辑。
 
     返回
     ----
@@ -352,7 +355,7 @@ def extract_terms(
             "llm_config 模块未找到，请确认项目根目录下存在 llm_config.py。"
         )
     try:
-        client, agent_cfg = get_client(agent)
+        client, agent_cfg = get_client(agent, profile_config=profile)
     except (ImportError, EnvironmentError, KeyError) as e:
         print(f"[术语提取] 无法初始化 LLM 客户端：{e}")
         raise
@@ -546,6 +549,7 @@ def extract_and_confirm(
     existing_terms: dict[str, str] | None = None,
     agent: str = "term_extractor",
     source_lang: str = "en",
+    profile: dict | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """
     完整流程：术语提取 + CLI 用户确认。
@@ -556,6 +560,7 @@ def extract_and_confirm(
     existing_terms: 已有词典映射，用于过滤重复词条
     agent         : LLM agent 名称
     source_lang   : 源语言代码（如 "en"、"ja"），传递给术语提取提示词
+    profile       : 由 get_profile_config() 返回的方案配置字典（可选），透传给 extract_terms
 
     返回
     ----
@@ -563,7 +568,10 @@ def extract_and_confirm(
       - 第一项：用户选择写入词典的新词条（调用方负责持久化）
       - 第二项：用户选择仅本次使用的临时词条（调用方负责合并到 term_map，不写文件）
     """
-    terms = extract_terms(blocks, existing_terms=existing_terms, agent=agent, source_lang=source_lang)
+    terms = extract_terms(
+        blocks, existing_terms=existing_terms, agent=agent,
+        source_lang=source_lang, profile=profile,
+    )
 
     if not terms:
         print("[术语提取] 未提取到新术语，跳过确认流程。")

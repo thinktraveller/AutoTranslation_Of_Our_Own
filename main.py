@@ -14,6 +14,7 @@ main.py — ATO3 主流程入口
     --no-general-dict       不加载通用词典
     --skip-polish           跳过润色步骤
     --skip-term-extract     跳过术语提取，直接使用现有词典
+    --profile NAME          使用指定的模型方案（fast/balanced/quality 或自定义方案名）
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ from src.term_extractor import extract_and_confirm
 from src.translator import translate_work, verify_terms, save_progress, load_progress
 from src.polisher import polish_work
 from src.output_writer import write_all, get_output_paths, _safe_stem
+from src.llm_config import get_profile_config
 
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────
@@ -187,6 +189,11 @@ def _parse_args(argv=None) -> argparse.Namespace:
         '--docx-template', default=None, metavar='PATH',
         help='pandoc --reference-doc 模板路径（可选，用于指定 docx 字体/样式）',
     )
+    parser.add_argument(
+        '--profile', default=None, metavar='NAME',
+        help='使用指定的模型方案（如 fast / balanced / quality）。'
+             '未指定时使用 config.json 中的 default_profile，或旧版 agents 字段。',
+    )
     return parser.parse_args(argv)
 
 
@@ -224,23 +231,60 @@ def _interactive_input() -> list[str]:
         argv.append(raw)
         break
 
-    # 2. 源语言（默认 en）
+    # 2. 模型方案选择
+    print()
+    # 动态读取 config.json 中的自定义方案（若有）
+    _custom_profiles: list[str] = []
+    try:
+        from src.llm_config import load_config as _load_cfg
+        _cfg = _load_cfg()
+        _builtin_names = {"fast", "balanced", "quality"}
+        _custom_profiles = [k for k in _cfg.get("profiles", {}) if k not in _builtin_names]
+    except Exception:
+        pass
+
+    print('可用模型方案：')
+    print('  [1] fast     - 全程 DeepSeek（速度快、成本低）')
+    print('  [2] balanced - DeepSeek 翻译 + GPT-4o-mini 润色（推荐）')
+    print('  [3] quality  - 全程 OpenAI GPT-4o（质量最优）')
+    _extra_start = 4
+    for _i, _pname in enumerate(_custom_profiles, _extra_start):
+        print(f'  [{_i}] {_pname}（自定义方案）')
+    _total_choices = 3 + len(_custom_profiles)
+    print(f'  [{_total_choices + 1}] 使用配置文件中的 default_profile（或旧版 agents 字段）')
+    print()
+    _profile_map = {
+        '1': 'fast', '2': 'balanced', '3': 'quality',
+    }
+    for _i, _pname in enumerate(_custom_profiles, _extra_start):
+        _profile_map[str(_i)] = _pname
+
+    while True:
+        _sel = input(f'请选择方案 [1-{_total_choices + 1}，默认 {_total_choices + 1}]：').strip()
+        if _sel == '' or _sel == str(_total_choices + 1):
+            break  # 不追加 --profile，由配置文件决定
+        if _sel in _profile_map:
+            argv.extend(['--profile', _profile_map[_sel]])
+            break
+        print(f'  请输入 1 到 {_total_choices + 1} 之间的数字。')
+
+    # 3. 源语言（默认 en）
     print('  可选语言代码：en（英文）/ ja（日文）/ ko（韩文）/ fr（法文）/ de（德文）/ es（西班牙文）/ ru（俄文）')
     source_lang_input = input('源语言代码（回车使用默认值 en）：').strip().lower()
     if source_lang_input and source_lang_input != 'en':
         argv.extend(['--source-lang', source_lang_input])
 
-    # 3. 是否跳过术语提取
+    # 4. 是否跳过术语提取
     skip_extract = input('跳过术语提取，直接使用现有词典？[y 跳过 / 回车继续提取]: ').strip().lower()
     if skip_extract == 'y':
         argv.append('--skip-term-extract')
 
-    # 4. 是否跳过润色
+    # 5. 是否跳过润色
     skip_polish = input('跳过润色步骤？[y 跳过 / 回车执行润色]: ').strip().lower()
     if skip_polish == 'y':
         argv.append('--skip-polish')
 
-    # 5. IP 词典路径（扫描 dicts/ip/ 目录供编号选择）
+    # 6. IP 词典路径（扫描 dicts/ip/ 目录供编号选择）
     ip_dir = Path(__file__).parent / 'dicts' / 'ip'
     ip_json_files = sorted(ip_dir.glob('*.json')) if ip_dir.exists() else []
     if ip_json_files:
@@ -261,12 +305,12 @@ def _interactive_input() -> list[str]:
         if ip_dict:
             argv.extend(['--ip-dict', ip_dict])
 
-    # 6. 是否禁用通用词典
+    # 7. 是否禁用通用词典
     no_general = input('禁用通用词典？[y 禁用 / 回车启用]: ').strip().lower()
     if no_general == 'y':
         argv.append('--no-general-dict')
 
-    # 7. docx 模板（自动检测默认路径）
+    # 8. docx 模板（自动检测默认路径）
     default_tpl = Path(__file__).parent / 'markdown-to-docx' / 'template.docx'
     if default_tpl.exists():
         print(f'  检测到默认 docx 模板：{default_tpl}')
@@ -298,6 +342,15 @@ def main(argv=None) -> int:
     if argv is None and len(sys.argv) == 1:
         argv = _interactive_input()
     args = _parse_args(argv)
+
+    # ── 加载模型方案配置（四级优先级：--profile > default_profile > agents > 硬编码）──
+    try:
+        profile_cfg = get_profile_config(args.profile)
+        _profile_name = args.profile or 'default_profile / agents'
+        print(f'  [方案] 使用模型方案：{_profile_name}')
+    except Exception as e:
+        print(f'  [警告] 加载模型方案失败：{e}，将使用 config.json 的 agents 字段兜底。')
+        profile_cfg = None
 
     # ── 步骤计数 ──────────────────────────────────────────────────────────
     # 动态计算总步骤数，供进度提示使用
@@ -446,7 +499,10 @@ def main(argv=None) -> int:
         step('术语提取与 CLI 确认')
         all_blocks = work.body + work.tags + work.summary + work.notes + work.endnotes
         try:
-            new_terms, session_terms = extract_and_confirm(all_blocks, existing_terms=term_map, source_lang=args.source_lang)
+            new_terms, session_terms = extract_and_confirm(
+                all_blocks, existing_terms=term_map,
+                source_lang=args.source_lang, profile=profile_cfg,
+            )
         except KeyboardInterrupt:
             raise  # 交给上层信号处理器
         except Exception as e:
@@ -498,7 +554,10 @@ def main(argv=None) -> int:
         if pending_non_body:
             print(f'  翻译非正文区（{len(pending_non_body)} 段）...')
             try:
-                translate_work(pending_non_body, term_map=term_map, source_lang=args.source_lang)
+                translate_work(
+                    pending_non_body, term_map=term_map,
+                    source_lang=args.source_lang, profile=profile_cfg,
+                )
             except KeyboardInterrupt:
                 raise  # 交给信号处理器
             except Exception as e:
@@ -516,7 +575,10 @@ def main(argv=None) -> int:
     elif work.body:
         print(f'  翻译正文（{len(work.body)} 段）...')
         try:
-            translate_work(work.body, term_map=term_map, source_lang=args.source_lang)
+            translate_work(
+                work.body, term_map=term_map,
+                source_lang=args.source_lang, profile=profile_cfg,
+            )
         except KeyboardInterrupt:
             raise  # 交给信号处理器
         except Exception as e:
@@ -556,7 +618,11 @@ def main(argv=None) -> int:
         else:
             step('润色正文')
             try:
-                polish_work(work.body, skip_polish=False, source_lang=args.source_lang, chapters=work.chapters)
+                polish_work(
+                    work.body, skip_polish=False,
+                    source_lang=args.source_lang, chapters=work.chapters,
+                    profile=profile_cfg,
+                )
             except KeyboardInterrupt:
                 raise  # 交给信号处理器
             except Exception as e:

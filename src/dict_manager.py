@@ -238,7 +238,7 @@ def _menu_view_terms(path: Path, data: dict) -> None:
 def _menu_add_term(path: Path, data: dict) -> None:
     """添加单条词条。"""
     _print_header("添加词条")
-    src = _prompt("原文（英文术语）")
+    src = _prompt("原文")
     if not src:
         print("  已取消。")
         return

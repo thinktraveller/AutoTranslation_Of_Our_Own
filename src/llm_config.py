@@ -4,12 +4,14 @@ llm_config.py — LLM 配置模块
 功能：
   - 读取 config.json 中的提供商与 agent 配置
   - 从 .env 中加载 API Key 环境变量
-  - 提供 get_client(agent_name) 获取对应 openai.OpenAI 实例
-  - 直接运行（python llm_config.py）进入 CLI 交互式配置编辑器
+  - 提供 get_client(agent_name, profile_config) 获取对应 openai.OpenAI 实例
+  - 提供 get_profile_config(profile_name) 按四级优先级加载模型方案配置
+  - 直接运行（python llm_config.py）进入 CLI 交互式配置编辑器（含方案管理）
 
 用法（作为模块导入）：
-    from llm_config import get_client, get_agent_config
-    client, config = get_client("translator")
+    from llm_config import get_client, get_agent_config, get_profile_config
+    profile_cfg = get_profile_config("balanced")
+    client, config = get_client("translator", profile_config=profile_cfg)
     response = client.chat.completions.create(
         model=config["model"],
         messages=[...],
@@ -17,6 +19,7 @@ llm_config.py — LLM 配置模块
     )
 """
 
+import copy
 import json
 import os
 import sys
@@ -132,12 +135,79 @@ def get_agent_config(agent_name: str) -> dict:
     return result
 
 
-def get_client(agent_name: str):
+def get_profile_config(profile_name: str | None = None) -> dict:
+    """
+    返回指定 profile 下各 agent 的配置字典（深拷贝）。
+
+    查找优先级：
+      1. 显式传入的 profile_name
+      2. config.json 的 default_profile 字段
+      3. config.json 的顶层 agents 字段（旧版兼容）
+      4. 内置硬编码默认值（config.json 缺失时的最后兜底）
+
+    Args:
+        profile_name: 方案名称（如 "fast" / "balanced" / "quality"），None 表示自动选择
+
+    Returns:
+        dict，包含 "term_extractor" / "translator" / "polisher" 三个键，
+        每个键对应该 agent 的配置（provider / model / temperature）。
+    """
+    # 内置硬编码默认方案（config.json 完全缺失时的最后兜底）
+    _BUILTIN_PROFILES: dict[str, dict] = {
+        "fast": {
+            "term_extractor": {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.1},
+            "translator":     {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.3},
+            "polisher":       {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.3},
+        },
+        "balanced": {
+            "term_extractor": {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.1},
+            "translator":     {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.3},
+            "polisher":       {"provider": "openai",   "model": "gpt-4o-mini",   "temperature": 0.5},
+        },
+        "quality": {
+            "term_extractor": {"provider": "openai", "model": "gpt-4o-mini", "temperature": 0.1},
+            "translator":     {"provider": "openai", "model": "gpt-4o",      "temperature": 0.3},
+            "polisher":       {"provider": "openai", "model": "gpt-4o",      "temperature": 0.5},
+        },
+    }
+    _HARDCODED_DEFAULT = copy.deepcopy(_BUILTIN_PROFILES["balanced"])
+
+    try:
+        cfg = load_config()
+    except (FileNotFoundError, json.JSONDecodeError):
+        # config.json 不存在或无法解析：使用硬编码兜底
+        if profile_name and profile_name in _BUILTIN_PROFILES:
+            return copy.deepcopy(_BUILTIN_PROFILES[profile_name])
+        return _HARDCODED_DEFAULT
+
+    # 从 config.json 加载已定义的方案（文件方案优先于内置预设）
+    file_profiles: dict[str, dict] = cfg.get("profiles", {})
+    # 合并：内置预设 + 文件方案（文件方案可覆盖同名内置预设）
+    merged_profiles = {**_BUILTIN_PROFILES, **file_profiles}
+
+    # 确定要使用的方案名
+    name = profile_name or cfg.get("default_profile")
+
+    if name and name in merged_profiles:
+        return copy.deepcopy(merged_profiles[name])
+
+    # 兜底：返回顶层 agents 字段（旧版兼容）
+    if "agents" in cfg:
+        return copy.deepcopy(cfg["agents"])
+
+    return _HARDCODED_DEFAULT
+
+
+def get_client(agent_name: str, profile_config: dict | None = None):
     """
     获取指定 agent 对应的 (openai.OpenAI 实例, agent配置字典) 元组。
 
     Args:
-        agent_name: agent 名称
+        agent_name: agent 名称（如 "translator"、"polisher"、"term_extractor"）
+        profile_config: 由 get_profile_config() 返回的方案配置字典。
+            若不为 None，优先从其中取 agent 配置（包含 provider/model/temperature），
+            再与 config.json 中的提供商配置（base_url/api_key_env）合并；
+            若为 None，沿用现有逻辑（从 config.json 的 agents 字段读取）。
 
     Returns:
         (OpenAI client, agent_config_dict)
@@ -156,7 +226,41 @@ def get_client(agent_name: str):
         )
 
     _load_env()
-    agent_cfg = get_agent_config(agent_name)
+
+    if profile_config is not None and agent_name in profile_config:
+        # 使用方案配置中的 agent 配置，合并提供商的 base_url / api_key_env
+        profile_agent = dict(profile_config[agent_name])
+        provider_name = profile_agent.get("provider")
+        try:
+            config = load_config()
+            providers = config.get("providers", {})
+        except Exception:
+            providers = {}
+
+        if provider_name and provider_name in providers:
+            prov = providers[provider_name]
+            agent_cfg = {
+                "provider": provider_name,
+                "base_url": prov["base_url"],
+                "api_key_env": prov["api_key_env"],
+                **profile_agent,
+            }
+        elif provider_name:
+            # 提供商不在 config.json 中，尝试从旧版 agents 兜底
+            try:
+                fallback = get_agent_config(agent_name)
+                agent_cfg = {**fallback, **profile_agent}
+            except Exception:
+                raise KeyError(
+                    f"Profile 中指定的提供商 '{provider_name}' 未在 config.json 中配置，"
+                    f"且无法从旧版 agents 字段回退。请先运行 python -m src.llm_config 添加提供商。"
+                )
+        else:
+            # profile_agent 无 provider，回退到标准逻辑
+            agent_cfg = get_agent_config(agent_name)
+    else:
+        # 无 profile_config，使用旧版逻辑
+        agent_cfg = get_agent_config(agent_name)
 
     api_key_env = agent_cfg["api_key_env"]
     api_key = os.environ.get(api_key_env)
@@ -362,6 +466,208 @@ def _delete_provider(config: dict) -> None:
     print(f"提供商 '{name}' 已删除。")
 
 
+# ---------------------------------------------------------------------------
+# Profile 管理菜单
+# ---------------------------------------------------------------------------
+
+# 内置预设方案（不可删除，仅可被用户同名方案覆盖）
+_BUILTIN_PROFILE_NAMES = {"fast", "balanced", "quality"}
+
+_BUILTIN_PROFILES_DESC = {
+    "fast":     "全程 DeepSeek（速度快、成本低）",
+    "balanced": "DeepSeek 翻译 + GPT-4o-mini 润色（推荐）",
+    "quality":  "全程 OpenAI GPT-4o（质量最优）",
+}
+
+
+def _show_profiles(config: dict) -> None:
+    """打印所有方案的摘要信息。"""
+    # 内置预设方案
+    builtin: dict[str, dict] = {
+        "fast": {
+            "term_extractor": {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.1},
+            "translator":     {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.3},
+            "polisher":       {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.3},
+        },
+        "balanced": {
+            "term_extractor": {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.1},
+            "translator":     {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.3},
+            "polisher":       {"provider": "openai",   "model": "gpt-4o-mini",   "temperature": 0.5},
+        },
+        "quality": {
+            "term_extractor": {"provider": "openai", "model": "gpt-4o-mini", "temperature": 0.1},
+            "translator":     {"provider": "openai", "model": "gpt-4o",      "temperature": 0.3},
+            "polisher":       {"provider": "openai", "model": "gpt-4o",      "temperature": 0.5},
+        },
+    }
+
+    file_profiles: dict = config.get("profiles", {})
+    default_name: str = config.get("default_profile", "")
+
+    all_names = list(builtin.keys()) + [k for k in file_profiles if k not in builtin]
+    _print_separator()
+    print("所有可用模型方案：")
+    for name in all_names:
+        is_default = "（默认）" if name == default_name else ""
+        is_builtin = "（内置）" if name in builtin else "（自定义）"
+        # 取实际配置（自定义覆盖内置）
+        profile = file_profiles.get(name, builtin.get(name, {}))
+        print(f"  [{name}] {is_builtin}{is_default}")
+        for agent_key in ("term_extractor", "translator", "polisher"):
+            ac = profile.get(agent_key, {})
+            print(f"    {agent_key}: provider={ac.get('provider','?')}  model={ac.get('model','?')}  temperature={ac.get('temperature','?')}")
+    _print_separator()
+
+
+def _new_or_edit_profile(config: dict, edit_name: str | None = None) -> None:
+    """
+    新建或编辑方案。
+    edit_name: 若不为 None，则编辑已有方案；否则新建。
+    """
+    providers = list(config.get("providers", {}).keys())
+
+    if edit_name is None:
+        print("\n--- 新建模型方案 ---")
+        name = input("请输入新方案名称（字母/数字/下划线）：").strip()
+        if not name:
+            print("名称不能为空，操作取消。")
+            return
+    else:
+        print(f"\n--- 编辑方案：{edit_name} ---")
+        name = edit_name
+
+    file_profiles: dict = config.setdefault("profiles", {})
+
+    # 内置预设（作为编辑起始值的参考）
+    _builtin: dict[str, dict] = {
+        "fast": {
+            "term_extractor": {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.1},
+            "translator":     {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.3},
+            "polisher":       {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.3},
+        },
+        "balanced": {
+            "term_extractor": {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.1},
+            "translator":     {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.3},
+            "polisher":       {"provider": "openai",   "model": "gpt-4o-mini",   "temperature": 0.5},
+        },
+        "quality": {
+            "term_extractor": {"provider": "openai", "model": "gpt-4o-mini", "temperature": 0.1},
+            "translator":     {"provider": "openai", "model": "gpt-4o",      "temperature": 0.3},
+            "polisher":       {"provider": "openai", "model": "gpt-4o",      "temperature": 0.5},
+        },
+    }
+
+    # 取现有值：优先使用文件中的方案，其次使用内置预设，再次使用 balanced
+    existing = file_profiles.get(name, _builtin.get(name, copy.deepcopy(_builtin["balanced"])))
+
+    new_profile: dict = {}
+    print(f"  可用提供商：{providers}（直接回车保持不变）")
+    for agent_key in ("term_extractor", "translator", "polisher"):
+        print(f"  --- {agent_key} ---")
+        cur = existing.get(agent_key, {})
+        cur_provider = cur.get("provider", "deepseek")
+        cur_model = cur.get("model", "deepseek-chat")
+        cur_temp = cur.get("temperature", 0.3)
+
+        prov = input(f"    提供商 [当前: {cur_provider}]：").strip() or cur_provider
+        model = input(f"    模型   [当前: {cur_model}]：").strip() or cur_model
+        temp_str = input(f"    temperature [当前: {cur_temp}]：").strip()
+        temperature = float(temp_str) if temp_str else cur_temp
+
+        new_profile[agent_key] = {"provider": prov, "model": model, "temperature": temperature}
+
+    file_profiles[name] = new_profile
+    save_config(config)
+    print(f"方案 '{name}' 已保存。")
+
+
+def _delete_profile(config: dict) -> None:
+    """删除自定义方案（内置三个方案不可删除）。"""
+    print("\n--- 删除模型方案 ---")
+    file_profiles: dict = config.get("profiles", {})
+    custom_names = [k for k in file_profiles if k not in _BUILTIN_PROFILE_NAMES]
+    if not custom_names:
+        print("当前没有可删除的自定义方案（内置方案 fast/balanced/quality 不可删除）。")
+        return
+    print("可删除的自定义方案：", custom_names)
+    name = input("请输入要删除的方案名称：").strip()
+    if name in _BUILTIN_PROFILE_NAMES:
+        print(f"  内置方案 '{name}' 不可删除（可在 config.json 中同名定义以覆盖其配置）。")
+        return
+    if name not in file_profiles:
+        print(f"  方案 '{name}' 不存在。")
+        return
+
+    # 若删除的是当前 default_profile，同步清空
+    if config.get("default_profile") == name:
+        print(f"  注意：方案 '{name}' 当前为 default_profile，将自动重置为 'balanced'。")
+        config["default_profile"] = "balanced"
+
+    del file_profiles[name]
+    save_config(config)
+    print(f"方案 '{name}' 已删除。")
+
+
+def _set_default_profile(config: dict) -> None:
+    """将某方案设为 default_profile。"""
+    print("\n--- 设为默认方案 ---")
+    file_profiles: dict = config.get("profiles", {})
+    all_names = list(_BUILTIN_PROFILE_NAMES) + [k for k in file_profiles if k not in _BUILTIN_PROFILE_NAMES]
+    print("可用方案：", all_names)
+    name = input("请输入要设为默认的方案名称：").strip()
+    if name not in all_names:
+        print(f"  方案 '{name}' 不存在。")
+        return
+    config["default_profile"] = name
+    save_config(config)
+    print(f"已将 '{name}' 设为默认方案（default_profile）。")
+
+
+def _manage_profiles(config: dict) -> None:
+    """方案管理子菜单。"""
+    # 若当前配置仍是纯旧版结构（无 profiles），提示但不强制迁移
+    if "profiles" not in config and "agents" in config:
+        print()
+        print("  提示：当前使用旧版配置结构（仅含 agents 字段，无 profiles）。")
+        print("  方案管理功能可正常使用；新建方案后将写入 profiles 字段。")
+        print("  如需迁移，可在「新建方案」中创建与 agents 等价的方案，再设为默认。")
+
+    while True:
+        print()
+        print("  方案管理子菜单：")
+        print("    5-1. 查看所有方案")
+        print("    5-2. 新建方案")
+        print("    5-3. 编辑方案")
+        print("    5-4. 删除方案（内置三个方案不可删除）")
+        print("    5-5. 设为默认方案（修改 default_profile）")
+        print("    5-0. 返回主菜单")
+        sub = input("  输入子菜单编号：").strip()
+
+        config = load_config()  # 每次操作前重新加载
+        if sub in ("5-1", "51"):
+            _show_profiles(config)
+        elif sub in ("5-2", "52"):
+            _new_or_edit_profile(config, edit_name=None)
+        elif sub in ("5-3", "53"):
+            file_profiles: dict = config.get("profiles", {})
+            all_names = list(_BUILTIN_PROFILE_NAMES) + [k for k in file_profiles if k not in _BUILTIN_PROFILE_NAMES]
+            print("  可编辑方案：", all_names)
+            ename = input("  请输入要编辑的方案名称：").strip()
+            if ename:
+                _new_or_edit_profile(config, edit_name=ename)
+            else:
+                print("  操作取消。")
+        elif sub in ("5-4", "54"):
+            _delete_profile(config)
+        elif sub in ("5-5", "55"):
+            _set_default_profile(config)
+        elif sub in ("5-0", "50", "0", ""):
+            print("  返回主菜单。")
+            break
+        else:
+            print("  无效选项，请重新输入。")
+
+
 def run_cli() -> None:
     """CLI 交互式配置编辑器入口。"""
     _load_env()
@@ -399,8 +705,9 @@ def run_cli() -> None:
         print("  2. 添加/修改提供商")
         print("  3. 添加/修改 Agent（模型/提供商/温度）")
         print("  4. 查看/编辑 Agent 提示词")
-        print("  5. 删除提供商")
-        print("  6. 退出")
+        print("  5. 管理模型方案（Profile）")
+        print("  6. 删除提供商")
+        print("  7. 退出")
         choice = input("输入数字：").strip()
 
         if choice == "1":
@@ -417,8 +724,11 @@ def run_cli() -> None:
             _edit_agent_prompt(config)
         elif choice == "5":
             config = load_config()
-            _delete_provider(config)
+            _manage_profiles(config)
         elif choice == "6":
+            config = load_config()
+            _delete_provider(config)
+        elif choice == "7":
             print("退出配置编辑器。")
             break
         else:

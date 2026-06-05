@@ -439,3 +439,36 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 - 代码审查：`re` 模块已在第 9 行导入，两处修改语法正确，逻辑覆盖完整
 
 ---
+
+## [2026-06-05 11:47] 步骤 13 完成：模型方案（Profile）系统
+
+### 执行的任务
+- **config.json**：追加 `default_profile` 字段（值为 `"balanced"`）和顶层 `profiles` 字段，内置 `fast` / `balanced` / `quality` 三个预设方案；同时补充 `openai` 提供商配置；旧版 `agents` 字段原样保留（向下兼容）
+- **`src/llm_config.py`**：
+  - 新增 `get_profile_config(profile_name)` 函数，实现四级优先级（显式参数 → default_profile → agents → 硬编码兜底），返回深拷贝防止副作用
+  - 更新 `get_client(agent_name, profile_config=None)` 签名，`profile_config` 不为 None 时优先从方案中取 agent 配置并合并提供商的 base_url/api_key_env，否则沿用旧逻辑（向下兼容）
+  - 新增 Profile 管理子菜单（选项 5）：5-1 查看所有方案 / 5-2 新建方案 / 5-3 编辑方案 / 5-4 删除方案（内置不可删，并联动清空 default_profile）/ 5-5 设为默认方案；旧版菜单「删除提供商」从选项 5 调整为选项 6，「退出」从选项 6 调整为选项 7
+  - `import copy` 新增，用于深拷贝
+- **`main.py`**：
+  - 新增 `--profile NAME` CLI 参数
+  - `main()` 入口解析参数后立即调用 `get_profile_config(args.profile)` 加载方案配置，失败时静默降级为 None
+  - 将 `profile_cfg` 透传给三处 agent 调用：`extract_and_confirm`、`translate_work`（非正文区和正文两处）、`polish_work`
+  - `_interactive_input()` 在 HTML 路径输入之后、源语言之前插入方案选择菜单（动态列出内置方案 + config.json 中的自定义方案）
+- **`src/term_extractor.py`**：`extract_terms()` 和 `extract_and_confirm()` 签名新增 `profile` 参数，透传至 `get_client(profile_config=profile)`
+- **`src/translator.py`**：`translate_blocks()` 和 `translate_work()` 签名新增 `profile` 参数，透传至 `get_client(profile_config=profile)`
+- **`src/polisher.py`**：`polish_blocks()` 和 `polish_work()` 签名新增 `profile` 参数，透传至 `get_client(profile_config=profile)`；读取 `polish_batch_mode` 等字段时优先读 profile 的 polisher 配置，再回退到 `get_agent_config`
+- **`src/dict_manager.py`**：顺带提交之前遗留的微小改动（提示文本"原文（英文术语）"→"原文"）
+
+### 关键变更
+- `config.json`：新增 `default_profile` / `profiles`（fast/balanced/quality）/ openai 提供商
+- `src/llm_config.py`：新增 `get_profile_config()`、更新 `get_client()` 签名、新增 Profile 管理菜单（选项 5）
+- `main.py`：新增 `--profile` 参数、交互式方案选择、`profile_cfg` 传递给三个 agent 调用
+- `src/term_extractor.py` / `src/translator.py` / `src/polisher.py`：各新增 `profile` 参数并透传
+
+### 遇到的问题及解决方案
+- 无
+
+### 下一步计划
+- 步骤 13 全部完成，构建全部结束
+
+---

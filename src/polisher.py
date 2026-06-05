@@ -439,6 +439,7 @@ def polish_blocks(
     skip_polish: bool = False,
     source_lang: str = "en",
     chapters: list[list] | None = None,
+    profile: dict | None = None,
 ) -> None:
     """
     对 TranslatableBlock 列表进行润色，就地覆盖每个 block 的 translation 字段。
@@ -450,6 +451,8 @@ def polish_blocks(
     skip_polish  : 若为 True，立即返回，不调用 LLM（对应 --skip-polish 参数）
     source_lang  : 源语言代码（如 "en"、"ja"），用于提示词中说明译文来源
     chapters     : ParsedWork.chapters（章节边界列表），chapter 模式时使用
+    profile      : 由 get_profile_config() 返回的方案配置字典（可选）。
+                   不为 None 时优先从方案中取 agent 配置，否则沿用旧版逻辑。
 
     说明
     ----
@@ -480,18 +483,26 @@ def polish_blocks(
         raise ImportError(
             "llm_config 模块未找到，请确认项目根目录下存在 llm_config.py。"
         )
-    client, agent_cfg = get_client(agent)
+    client, agent_cfg = get_client(agent, profile_config=profile)
     # 注入 agent 名称，供 _call_llm 写日志时使用
     agent_cfg = dict(agent_cfg)
     agent_cfg["_agent_name"] = agent
 
     # 从 config 读取批次模式、自定义提示词和超时时间（默认 paragraph / 60000 / 120s）
+    # 若使用 profile，则从 profile 的 polisher 配置中读取，否则从 config.json 的 agents 字段读取
     batch_mode: str = "paragraph"
     token_limit: int = 60000
     custom_prompt: str | None = None
     llm_timeout: int = 120
     try:
-        if get_agent_config is not None:
+        if profile is not None and "polisher" in profile:
+            # profile 配置：polish_batch_mode / polish_context_token_limit / system_prompt / timeout
+            pcfg = profile.get("polisher", {})
+            batch_mode = pcfg.get("polish_batch_mode", "paragraph")
+            token_limit = int(pcfg.get("polish_context_token_limit", 60000))
+            custom_prompt = pcfg.get("system_prompt") or None
+            llm_timeout = int(pcfg.get("timeout", 120))
+        elif get_agent_config is not None:
             cfg = get_agent_config(agent)
             batch_mode = cfg.get("polish_batch_mode", "paragraph")
             token_limit = int(cfg.get("polish_context_token_limit", 60000))
@@ -529,11 +540,15 @@ def polish_work(
     skip_polish: bool = False,
     source_lang: str = "en",
     chapters: list[list] | None = None,
+    profile: dict | None = None,
 ) -> None:
     """
     polish_blocks 的别名，供 main.py 统一调用（接口与计划书一致）。
     """
-    polish_blocks(blocks, agent=agent, skip_polish=skip_polish, source_lang=source_lang, chapters=chapters)
+    polish_blocks(
+        blocks, agent=agent, skip_polish=skip_polish,
+        source_lang=source_lang, chapters=chapters, profile=profile,
+    )
 
 
 # ---------------------------------------------------------------------------

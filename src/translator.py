@@ -433,6 +433,7 @@ def translate_blocks(
     agent: str = "translator",
     progress_path: str | Path | None = None,
     source_lang: str = "en",
+    profile: dict | None = None,
 ) -> None:
     """
     对 TranslatableBlock 列表进行翻译，就地填充每个 block 的 translation 字段。
@@ -444,6 +445,8 @@ def translate_blocks(
     agent         : 使用的 agent 名称（对应 config.json 中的配置）
     progress_path : 断点续传文件路径（_ato3_progress.json），None 则不使用断点续传
     source_lang   : 源语言代码（如 "en"、"ja"），用于提示词中描述源文语言
+    profile       : 由 get_profile_config() 返回的方案配置字典（可选）。
+                    不为 None 时优先从方案中取 agent 配置，否则沿用旧版逻辑。
 
     说明
     ----
@@ -462,7 +465,7 @@ def translate_blocks(
         raise ImportError(
             "llm_config 模块未找到，请确认项目根目录下存在 llm_config.py。"
         )
-    client, agent_cfg = get_client(agent)
+    client, agent_cfg = get_client(agent, profile_config=profile)
     # 注入 agent 名称，供 _call_llm 写日志时使用
     agent_cfg = dict(agent_cfg)
     agent_cfg["_agent_name"] = agent
@@ -528,11 +531,15 @@ def translate_work(
     agent: str = "translator",
     progress_path: str | Path | None = None,
     source_lang: str = "en",
+    profile: dict | None = None,
 ) -> None:
     """
     translate_blocks 的别名，供 main.py 调用（接口与计划书一致）。
     """
-    translate_blocks(blocks, term_map=term_map, agent=agent, progress_path=progress_path, source_lang=source_lang)
+    translate_blocks(
+        blocks, term_map=term_map, agent=agent,
+        progress_path=progress_path, source_lang=source_lang, profile=profile,
+    )
 
 
 # ---------------------------------------------------------------------------
