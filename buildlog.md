@@ -573,6 +573,45 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 ---
 
+## [2026-06-05 16:53] 步骤 16 完成：三处 Bug 修复（词典推断 / 断点恢复映射 / 精校防误触）
+
+### 执行的任务
+
+**Bug 16-1：IP 词典自动推断（_infer_ip_dict）**
+- 新增 `_infer_ip_dict(input_path, work_tags)` 函数：扫描 `dicts/ip/` 目录，将所有词典文件名按 `-_` 拆词后与作品 tags 文本做子串评分匹配，找到最高分词典后询问用户是否使用
+- 分数为 0（完全无匹配）时不推荐，直接回退到原有按文件名推断逻辑
+- 在词典加载阶段（步骤 3），当 `args.ip_dict` 为 None 时先调用 `_infer_ip_dict()`，用户确认选用则覆盖 `_auto_ip_dict_path()` 的默认推断结果
+
+**Bug 16-2：断点恢复映射错误（_BP_TO_RESUME）**
+- 新增模块级常量 `_BP_TO_RESUME: dict[str, str]`，记录每个断点对应的恢复起始阶段：
+  - `after_term_confirm` → `"translate"`（跳过术语提取，从翻译开始）
+  - `after_txt_polish` → `"proofread"`（跳过翻译/润色，从"询问精校是否完成"开始）
+  - `after_md_review` → `"md"`（跳过精校，直接写 Markdown）
+- 修复 `after_txt_polish` 恢复时错误地重跑 `pause_for_proofread`（系统暂停）的问题：恢复时 txt 已存在，跳过 pause_for_proofread，直接进入精校确认断点（`_breakpoint_prompt_proofread`）
+- 修复 `after_md_review` 断点不生效的问题：旧版用 `_breakpoint_prompt`（Enter 即过），改为 `_breakpoint_prompt_proofread`（必须输入 y），且 `_skip_md` 逻辑改为根据 `_resume_stage == "md"` 判断而非硬编码断点名
+
+**Bug 16-3：精校确认防误触（_breakpoint_prompt_proofread）**
+- 新增 `_breakpoint_prompt_proofread(label, breakpoint_key, task_state, log_dir)` 函数
+- 必须显式输入 `y` 才能继续；仅按 Enter 会打印"请输入 y 或 s"提示并循环等待；输入 `s` 保存断点退出
+- 两处精校暂停（txt 精校确认、Markdown 检视确认）均改用此函数
+
+### 关键变更
+- `main.py`：
+  - 新增 `_infer_ip_dict()` 函数（约 50 行）
+  - 新增 `_BP_TO_RESUME` 模块级常量
+  - 新增 `_breakpoint_prompt_proofread()` 函数（约 30 行）
+  - 词典加载阶段新增 `_infer_ip_dict()` 调用逻辑
+  - 步骤 7-B 重写断点恢复分支，引入 `_resume_stage` 变量统一控制流程跳转
+  - 两处精校断点改用 `_breakpoint_prompt_proofread()`
+
+### 遇到的问题及解决方案
+- 无
+
+### 下一步计划
+- 步骤 16 全部完成，构建全部结束
+
+---
+
 ## [2026-06-05 16:12] 新增：启动时检测可用模型方案完整性
 
 ### 问题描述

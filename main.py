@@ -70,6 +70,57 @@ def _auto_ip_dict_path(input_path: Path) -> Path:
     return Path(__file__).parent / 'dicts' / 'ip' / f'{stem}.json'
 
 
+def _infer_ip_dict(input_path: Path, work_tags: list) -> Path | None:
+    """
+    扫描 dicts/ip/ 目录，用作品的 HTML tags 文本与词典文件名做子串评分匹配，
+    推荐最佳匹配词典并让用户确认。
+
+    评分逻辑：将每个词典文件名（去除扩展名后按 - _ 拆词）中的各词，
+    与所有 tag 文本（小写合并）做子串搜索，命中词越多分数越高。
+
+    返回用户确认使用的词典 Path，或 None（不使用推荐，回退默认推断）。
+    """
+    ip_dir = Path(__file__).parent / 'dicts' / 'ip'
+    if not ip_dir.exists():
+        return None
+
+    candidates = sorted(ip_dir.glob('*.json'))
+    if not candidates:
+        return None
+
+    # 将所有 tag 文本合并为小写字符串（供子串搜索）
+    tag_text = ' '.join(
+        getattr(b, 'text', '') for b in work_tags
+    ).lower()
+
+    if not tag_text.strip():
+        return None
+
+    def _score(dict_path: Path) -> int:
+        """计算词典文件名与 tag 文本的子串匹配得分。"""
+        # 将文件名主干按常见分隔符拆分为词（如 honkai-starrail → [honkai, starrail]）
+        parts = re.split(r'[-_\s]+', dict_path.stem.lower())
+        return sum(1 for part in parts if part and part in tag_text)
+
+    scored = sorted(candidates, key=_score, reverse=True)
+    best = scored[0]
+    best_score = _score(best)
+
+    # 分数为 0 表示完全无匹配，不推荐
+    if best_score == 0:
+        return None
+
+    print(f'\n  [词典推断] 根据作品标签，推荐 IP 词典：{best.name}（匹配得分 {best_score}）')
+    try:
+        confirm = input('  使用该词典？[回车确认 / n 跳过使用默认推断]: ').strip().lower()
+    except EOFError:
+        confirm = ''
+
+    if confirm == 'n':
+        return None
+    return best
+
+
 def _load_ip_dict_data(ip_dict_path: Path) -> dict:
     """加载 IP 词典，若不存在则返回空词典结构（不报错）。"""
     if ip_dict_path.exists():
@@ -106,6 +157,17 @@ _BP_AFTER_MD_REVIEW = "after_md_review"
 
 # task_state.json 版本号（供未来格式升级使用）
 _TASK_STATE_VERSION = 1
+
+# 断点 → 恢复时跳转到的起始阶段标识
+# 含义：从该断点恢复时，应从哪个"阶段入口"开始执行
+#   "translate"   → 从翻译阶段开始（跳过术语提取）
+#   "proofread"   → 从"询问 txt 精校是否完成"开始（跳过翻译、润色）
+#   "md"          → 从写 Markdown 开始（跳过翻译、润色、精校）
+_BP_TO_RESUME: dict[str, str] = {
+    _BP_AFTER_TERM_CONFIRM: "translate",
+    _BP_AFTER_TXT_POLISH:   "proofread",
+    _BP_AFTER_MD_REVIEW:    "md",
+}
 
 
 def _create_task_log_dir(html_path: str | Path) -> Path:
@@ -179,6 +241,37 @@ def _breakpoint_prompt(label: str, breakpoint_key: str,
         print("  下次启动脚本时可选择恢复此任务。")
         return False
     return True
+
+
+def _breakpoint_prompt_proofread(label: str, breakpoint_key: str,
+                                 task_state: dict, log_dir: Path) -> bool:
+    """
+    精校专用断点提示：防止误触，必须显式输入 'y' 才能继续。
+    - 输入 'y'（或 'Y'）：继续执行
+    - 仅按 Enter：提示"请输入 y 确认精校完成"，重新询问
+    - 输入 's'：保存进度并退出（同 _breakpoint_prompt）
+    返回 True 表示继续，False 表示保存退出。
+    """
+    print(f"\n[精校断点] {label}")
+    print("  [y]     确认精校完成，继续执行")
+    print("  [s]     保存进度并退出（下次启动可从此处恢复）")
+    print("  （直接按 Enter 无效，需明确输入 y 或 s）")
+    while True:
+        try:
+            choice = input("请选择：").strip().lower()
+        except EOFError:
+            choice = "y"  # 非交互环境直接继续
+        if choice == "y":
+            return True
+        if choice == "s":
+            task_state["breakpoint"] = breakpoint_key
+            task_state["interrupted_at"] = datetime.now().isoformat()
+            _save_task_state(task_state, log_dir)
+            print(f"  进度已保存至 {log_dir / _TASK_STATE_FILENAME}")
+            print("  下次启动脚本时可选择恢复此任务。")
+            return False
+        # 仅 Enter 或其他输入：提示重试
+        print("  请输入 y（确认精校完成）或 s（保存退出），不能直接回车跳过。")
 
 
 def _find_incomplete_tasks() -> list[dict]:
@@ -860,7 +953,14 @@ def main(argv=None) -> int:
         else:
             print(f'  [警告] 通用词典不存在：{general_dict_path}，跳过。')
 
-    ip_dict_path = Path(args.ip_dict) if args.ip_dict else _auto_ip_dict_path(html_path)
+    # ── IP 词典路径确定（自动推断 → 评分匹配 → 用户确认）──────────────────
+    if args.ip_dict:
+        ip_dict_path = Path(args.ip_dict)
+    else:
+        # 先用评分匹配询问用户是否使用已有词典
+        _inferred = _infer_ip_dict(html_path, work.tags)
+        ip_dict_path = _inferred if _inferred is not None else _auto_ip_dict_path(html_path)
+
     ip_data = _load_ip_dict_data(ip_dict_path)
     ip_terms_count = len(ip_data.get('terms', {}))
     status = '（已有）' if ip_dict_path.exists() else '（将新建）'
@@ -1053,50 +1153,80 @@ def main(argv=None) -> int:
         print(f'  [跳过] txt 已存在（来自断点恢复）：{output_paths["txt"]}')
 
     # ── 7-B: 精校暂停 + 断点 2（after_txt_polish）────────────────────────
-    # after_txt_polish：用户已精校 txt，直接读取精校内容跳过暂停
-    # after_md_review：md 已生成，跳过精校和 md 生成
-    _skip_proofread = (
-        _resuming_bp in (_BP_AFTER_TXT_POLISH, _BP_AFTER_MD_REVIEW)
+    # 恢复阶段判断（利用 _BP_TO_RESUME 映射表）：
+    #   after_txt_polish → resume_stage = "proofread"：从"询问精校是否完成"开始
+    #   after_md_review  → resume_stage = "md"：跳过精校，直接写 md
+    _resume_stage = _BP_TO_RESUME.get(_resuming_bp, "") if _resuming_bp else ""
+
+    # after_md_review 断点恢复：跳过精校，直接读取已有 txt 回填
+    _skip_to_md = (
+        _resume_stage == "md"
         and output_paths["txt"].exists()
     )
-    if not _skip_proofread:
-        proofread_paragraphs = pause_for_proofread(output_paths["txt"])
-        body_count = sum(1 for b in work.body if b.translation)
-        if len(proofread_paragraphs) != body_count:
-            print(
-                f'[警告] 精校后段落数（{len(proofread_paragraphs)}）'
-                f'与原始正文段落数（{body_count}）不一致。'
-            )
-            try:
-                cont = input('是否继续？(y/n): ').strip().lower()
-            except EOFError:
-                cont = 'y'
-            if cont != 'y':
-                print('已取消。txt 文件保留，md 和 docx 未生成。')
-                return 0
-        for i, block in enumerate(work.body):
-            if i < len(proofread_paragraphs):
-                block.translation = proofread_paragraphs[i]
 
-        # 断点 2
-        if not _breakpoint_prompt(
-            "txt 已生成，请精校正文后按 Enter 继续生成 Markdown...",
-            _BP_AFTER_TXT_POLISH,
-            task_state,
-            task_log_dir,
-        ):
-            return 0
-    else:
-        # 从断点恢复：读取已精校的 txt 内容，回填 work.body
+    if _skip_to_md:
+        # 从断点恢复（after_md_review）：读取已精校的 txt 内容，回填 work.body
         _txt = output_paths["txt"].read_text(encoding="utf-8")
         proofread_paragraphs = [p.strip() for p in _txt.split("\n\n") if p.strip()]
         for i, block in enumerate(work.body):
             if i < len(proofread_paragraphs):
                 block.translation = proofread_paragraphs[i]
-        print(f'  [恢复] 已读取精校 txt（{len(proofread_paragraphs)} 段）')
+        print(f'  [恢复] 已读取精校 txt（{len(proofread_paragraphs)} 段），跳过精校步骤')
+    else:
+        # 正常流程 / after_txt_polish 恢复：
+        #   after_txt_polish 恢复时 txt 已存在，跳过 pause_for_proofread（系统暂停），
+        #   但仍需停下来询问用户"精校是否完成"（精校确认断点）
+        _txt_exists_for_resume = (
+            _resume_stage == "proofread"
+            and output_paths["txt"].exists()
+        )
+
+        if _txt_exists_for_resume:
+            # 从 after_txt_polish 恢复：txt 已在上方写出（或已存在），
+            # 直接进入精校确认询问，不再调用 pause_for_proofread
+            print(f'\n  [断点恢复] txt 文件：{output_paths["txt"]}')
+            print('  请在编辑器中完成精校后，返回此处确认。')
+        else:
+            # 正常流程：调用 pause_for_proofread 打印路径并等待用户
+            proofread_paragraphs = pause_for_proofread(output_paths["txt"])
+            body_count = sum(1 for b in work.body if b.translation)
+            if len(proofread_paragraphs) != body_count:
+                print(
+                    f'[警告] 精校后段落数（{len(proofread_paragraphs)}）'
+                    f'与原始正文段落数（{body_count}）不一致。'
+                )
+                try:
+                    cont = input('是否继续？(y/n): ').strip().lower()
+                except EOFError:
+                    cont = 'y'
+                if cont != 'y':
+                    print('已取消。txt 文件保留，md 和 docx 未生成。')
+                    return 0
+            for i, block in enumerate(work.body):
+                if i < len(proofread_paragraphs):
+                    block.translation = proofread_paragraphs[i]
+
+        # 精校确认断点（无论是正常流程还是 after_txt_polish 恢复，均需显式确认）
+        # 使用防误触版本：必须输入 y 才能继续
+        if not _breakpoint_prompt_proofread(
+            "请在编辑器中完成 txt 精校后，输入 y 继续生成 Markdown...",
+            _BP_AFTER_TXT_POLISH,
+            task_state,
+            task_log_dir,
+        ):
+            return 0
+
+        # 精校确认后，读取最新 txt 内容回填（用户可能已修改文件）
+        if output_paths["txt"].exists():
+            _txt = output_paths["txt"].read_text(encoding="utf-8")
+            proofread_paragraphs = [p.strip() for p in _txt.split("\n\n") if p.strip()]
+            for i, block in enumerate(work.body):
+                if i < len(proofread_paragraphs):
+                    block.translation = proofread_paragraphs[i]
+            print(f'  [精校] 已读取精校后 txt（{len(proofread_paragraphs)} 段）')
 
     # ── 7-C: 写 Markdown ──────────────────────────────────────────────────
-    _skip_md = _resuming_bp == _BP_AFTER_MD_REVIEW and output_paths["md"].exists()
+    _skip_md = _resume_stage == "md" and output_paths["md"].exists()
     if not _skip_md:
         try:
             write_markdown(work, output_paths["md"])
@@ -1106,9 +1236,9 @@ def main(argv=None) -> int:
     else:
         print(f'  [跳过] Markdown 已存在（来自断点恢复）：{output_paths["md"]}')
 
-    # 断点 3（after_md_review）
-    if not _breakpoint_prompt(
-        "Markdown 已生成，请检视格式后按 Enter 继续生成 docx...",
+    # 断点 3（after_md_review）：Markdown 检视确认，防误触，必须输入 y
+    if not _breakpoint_prompt_proofread(
+        "请检视 Markdown 格式，确认无误后输入 y 生成 docx...",
         _BP_AFTER_MD_REVIEW,
         task_state,
         task_log_dir,
