@@ -157,29 +157,60 @@ def _interactive_input() -> list[str]:
         argv.extend(['--source-lang', source_lang_input])
 
     # 3. 是否跳过术语提取
-    skip_extract = input('跳过术语提取？直接使用现有词典 (y/N): ').strip().lower()
+    skip_extract = input('跳过术语提取，直接使用现有词典？[y 跳过 / 回车继续提取]: ').strip().lower()
     if skip_extract == 'y':
         argv.append('--skip-term-extract')
 
-    # 3. 是否跳过润色
-    skip_polish = input('跳过润色步骤？(y/N): ').strip().lower()
+    # 4. 是否跳过润色
+    skip_polish = input('跳过润色步骤？[y 跳过 / 回车执行润色]: ').strip().lower()
     if skip_polish == 'y':
         argv.append('--skip-polish')
 
-    # 4. IP 词典路径（可选）
-    ip_dict = input('IP 词典路径（回车自动按文件名推断）：').strip().strip('"').strip("'")
-    if ip_dict:
-        argv.extend(['--ip-dict', ip_dict])
+    # 5. IP 词典路径（扫描 dicts/ip/ 目录供编号选择）
+    ip_dir = Path(__file__).parent / 'dicts' / 'ip'
+    ip_json_files = sorted(ip_dir.glob('*.json')) if ip_dir.exists() else []
+    if ip_json_files:
+        print('  dicts/ip/ 目录下已有以下 IP 词典：')
+        for idx, f in enumerate(ip_json_files, 1):
+            print(f'    [{idx}] {f.name}')
+        print(f'    [0] 不选择（按输入文件名自动推断）')
+        while True:
+            sel = input(f'请选择 IP 词典编号（0-{len(ip_json_files)}，回车=0）：').strip()
+            if sel == '' or sel == '0':
+                break
+            if sel.isdigit() and 1 <= int(sel) <= len(ip_json_files):
+                argv.extend(['--ip-dict', str(ip_json_files[int(sel) - 1])])
+                break
+            print(f'  请输入 0 到 {len(ip_json_files)} 之间的数字。')
+    else:
+        ip_dict = input('IP 词典路径（回车自动按文件名推断）：').strip().strip('"').strip("'")
+        if ip_dict:
+            argv.extend(['--ip-dict', ip_dict])
 
-    # 5. 是否禁用通用词典
-    no_general = input('禁用通用词典？(y/N): ').strip().lower()
+    # 6. 是否禁用通用词典
+    no_general = input('禁用通用词典？[y 禁用 / 回车启用]: ').strip().lower()
     if no_general == 'y':
         argv.append('--no-general-dict')
 
-    # 6. docx 模板（可选）
-    docx_tpl = input('docx 模板路径（回车跳过，不使用模板）：').strip().strip('"').strip("'")
-    if docx_tpl:
-        argv.extend(['--docx-template', docx_tpl])
+    # 7. docx 模板（自动检测默认路径）
+    default_tpl = Path(__file__).parent / 'markdown-to-docx' / 'template.docx'
+    if default_tpl.exists():
+        print(f'  检测到默认 docx 模板：{default_tpl}')
+        use_default_tpl = input('使用该模板？[回车使用 / n 跳过 / 输入其他路径]: ').strip()
+        if use_default_tpl.lower() == 'n':
+            pass  # 不使用任何模板
+        elif use_default_tpl == '':
+            argv.extend(['--docx-template', str(default_tpl)])
+        else:
+            custom_tpl = use_default_tpl.strip('"').strip("'")
+            if Path(custom_tpl).exists():
+                argv.extend(['--docx-template', custom_tpl])
+            else:
+                print(f'  [警告] 路径不存在：{custom_tpl}，将不使用模板。')
+    else:
+        docx_tpl = input('docx 模板路径（回车跳过，不使用模板）：').strip().strip('"').strip("'")
+        if docx_tpl:
+            argv.extend(['--docx-template', docx_tpl])
 
     print()
     print(f'等价命令：python main.py {" ".join(argv)}')
