@@ -390,3 +390,32 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 - 步骤 12 全部子项完成
 
 ---
+
+## 修复记录 2026-06-05 11:16
+
+### Bug 修复
+
+**B-1：`verify_terms()` `\b` 不兼容非 ASCII 字符**
+- 文件：`src/translator.py`
+- 问题：`verify_terms()` 对词典键统一使用 `\b` 单词边界正则，导致全非 ASCII 字符（如中文、日文词条）无法匹配，术语校验失效
+- 修复：对全非 ASCII 字符的词典键不使用 `\b` 边界，改用子串匹配（`in` 运算符或无边界正则），ASCII 词条保持 `\b` 匹配不变
+
+**B-2：`main.py` 第 33 行 Pylance `reconfigure` 属性报错（`sys.stdout`）**
+- 文件：`main.py`
+- 问题：`sys.stdout.reconfigure(...)` 调用在静态类型检查（Pylance）下报错，因为 `sys.stdout` 类型为 `TextIO`，该接口不含 `reconfigure` 方法
+- 修复：新增 `import io` 和 `from typing import cast`，用 `hasattr(sys.stdout, "reconfigure")` 守卫，配合 `cast(io.TextIOWrapper, sys.stdout).reconfigure(...)` 消除静态类型报错
+
+**B-3：`main.py` 第 34 行 Pylance `reconfigure` 属性报错（`sys.stderr`）**
+- 文件：`main.py`
+- 问题：同 B-2，`sys.stderr.reconfigure(...)` 存在相同静态类型问题
+- 修复：同 B-2，使用 `hasattr` 守卫配合 `cast(io.TextIOWrapper, sys.stderr).reconfigure(...)` 消除报错
+
+### 关键变更
+- `src/translator.py`：`verify_terms()` 增加 ASCII/非 ASCII 分支判断，全非 ASCII 键改用子串匹配
+- `main.py`：新增 `import io`、`from typing import cast`，对 `sys.stdout` 和 `sys.stderr` 的 `reconfigure` 调用加 `hasattr` 守卫与 `cast` 类型断言
+
+### 验证方法
+- 静态检查：Pylance 对 `main.py` 第 33、34 行不再报 `reconfigure` 属性错误
+- 功能验证：含中文/日文词条的词典在 `verify_terms()` 中可正常命中，ASCII 词条行为不变
+
+---
