@@ -4,31 +4,46 @@
       "base_url": "https://api.deepseek.com/v1",
       "api_key_env": "DEEPSEEK_API_KEY"
     },
-    "openai": {
-      "base_url": "https://api.openai.com/v1",
-      "api_key_env": "OPENAI_API_KEY"
-    },
     "thinktraveller": {
       "base_url": "https://llm.thinktraveller.xyz/v1",
       "api_key_env": "THINKTRAVELLER_API_KEY"
     }
   },
-  "default_profile": "balanced",
+  "default_profile": "general",
   "profiles": {
-    "fast": {
-      "term_extractor": { "provider": "deepseek", "model": "deepseek-chat", "temperature": 0.1 },
-      "translator":     { "provider": "deepseek", "model": "deepseek-chat", "temperature": 0.3 },
-      "polisher":       { "provider": "deepseek", "model": "deepseek-chat", "temperature": 0.3 }
+    "r18": {
+      "term_extractor": {
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "temperature": 0.1
+      },
+      "translator": {
+        "provider": "thinktraveller",
+        "model": "local-qwen3.6-27b-uncensored:latest",
+        "temperature": 0.3
+      },
+      "polisher": {
+        "provider": "thinktraveller",
+        "model": "local-qwen3.6-27b-uncensored:latest",
+        "temperature": 0.8
+      }
     },
-    "balanced": {
-      "term_extractor": { "provider": "deepseek", "model": "deepseek-chat", "temperature": 0.1 },
-      "translator":     { "provider": "deepseek", "model": "deepseek-chat", "temperature": 0.3 },
-      "polisher":       { "provider": "openai",   "model": "gpt-4o-mini",   "temperature": 0.5 }
-    },
-    "quality": {
-      "term_extractor": { "provider": "openai", "model": "gpt-4o-mini", "temperature": 0.1 },
-      "translator":     { "provider": "openai", "model": "gpt-4o",      "temperature": 0.3 },
-      "polisher":       { "provider": "openai", "model": "gpt-4o",      "temperature": 0.5 }
+    "general": {
+      "term_extractor": {
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "temperature": 0.1
+      },
+      "translator": {
+        "provider": "deepseek",
+        "model": "deepseek-v4-pro",
+        "temperature": 0.3
+      },
+      "polisher": {
+        "provider": "deepseek",
+        "model": "deepseek-v4-pro",
+        "temperature": 0.8
+      }
     }
   },
   "agents": {
@@ -38,7 +53,7 @@
       "temperature": 0.1
     },
     "translator": {
-      "provider": "thinktraveller",
+      "provider": "deepseek",
       "model": "local-qwen3.6-27b-uncensored:latest",
       "temperature": 0.3
     },
@@ -49,5 +64,10 @@
       "polish_batch_mode": "paragraph",
       "polish_context_token_limit": 60000
     }
-  }
+  },
+  "deleted_profiles": [
+    "fast",
+    "balanced",
+    "quality"
+  ]
 }

@@ -493,7 +493,54 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 ### 遇到的问题及解决方案
 - 无
 
+### 验证结果
+- 验证脚本 `_verify/step14_check_output_dir.py` 共 6 类 11 项检查，全部通过（用户已确认）
+- 验证通过后脚本已删除
+
 ### 下一步计划
-- 步骤 14 全部完成，构建全部结束
+- 步骤 15：日志文件夹结构与三处断点续传
+
+---
+
+## [2026-06-05 15:21] 步骤 15 完成：日志文件夹结构与三处断点续传
+
+### 执行的任务
+
+**15-A 日志文件夹结构**
+- 新增 `logs/` 根日志文件夹（含 `.gitkeep`，目录本身纳入版本控制，内容被 `.gitignore` 排除）
+- 在 `main.py` 入口新增 `_create_task_log_dir()` 函数，每次任务创建 `logs/{词干}_{时间戳}/` 子文件夹
+- 将 `_checkpoint_path()` 修改为接受 `log_dir` 参数，将 progress.json 放在子日志文件夹内（原 `.translation_checkpoint.json` 同目录兼容路径保留为回退）
+- 更新 `.gitignore`，新增 `logs/*` / `!logs/.gitkeep` 规则
+
+**15-B 任务状态文件**
+- 新增 `_build_initial_task_state()` 函数，构造含 version/html_path/html_stem/started_at/interrupted_at/breakpoint/args/cache 字段的初始状态
+- 新增 `_save_task_state()` 函数，使用原子写入（先写 `.tmp` 再重命名）防止中断时文件损坏
+- `main()` 入口初始化后立即写入 `logs/{子目录}/task_state.json`；任务正常完成后将 `breakpoint` 清空为 `null`
+
+**15-C 三处断点实现**
+- 新增 `_breakpoint_prompt(label, breakpoint_key, task_state, log_dir)` 函数：显示 `[Enter]` 继续 / `[s]` 保存退出两个选项；选 `s` 时原子写入 task_state 后返回 `False`
+- 将原来的 `write_all()` 整合调用展开为逐步调用（`write_txt` / `pause_for_proofread` / `write_markdown` / `write_docx`）
+- 在术语提取步骤之后插入断点 1（`after_term_confirm`）
+- 在 txt 精校暂停之后、Markdown 生成之前插入断点 2（`after_txt_polish`）
+- 在 Markdown 生成之后、docx 生成之前插入断点 3（`after_md_review`）
+- 各断点恢复时正确跳过已完成阶段（如从 `after_md_review` 恢复时跳过写 txt / 精校 / 写 md）
+
+**15-D 启动时扫描未完成任务**
+- 新增 `_find_incomplete_tasks()` 函数：扫描 `logs/`，返回所有 `breakpoint != null` 的未完成任务（最新在前）
+- 新增 `_prompt_resume()` 函数：列出任务（含文件名、中断时间、断点位置），支持数字选择恢复、`d<序号>` 删除（`shutil.rmtree`）、回车忽略
+- `main()` 入口在交互模式下先调用扫描，选择恢复时从保存的 `args` 字段重建 argv，跳过 `_interactive_input()`，直接从断点处继续
+- 新增导入：`shutil`、`datetime`
+
+### 关键变更
+- `main.py`：新增 `_create_task_log_dir` / `_save_task_state` / `_build_initial_task_state` / `_breakpoint_prompt` / `_find_incomplete_tasks` / `_prompt_resume` 六个函数；`_checkpoint_path` 新增 `log_dir` 参数；`main()` 流程大幅扩展断点逻辑；`write_all` 调用改为逐步展开
+- `.gitignore`：新增 `logs/*` / `!logs/.gitkeep` 规则
+- `logs/.gitkeep`：新建，确保 logs 目录被 git 追踪
+
+### 遇到的问题及解决方案
+- `from src.output_writer import write_all` 改为导入各子函数（`write_txt` / `pause_for_proofread` / `write_markdown` / `pause_before_docx` / `write_docx`），`output_writer.py` 本身无需修改
+- 从 `after_txt_polish` 恢复时需跳过精校暂停并读取已精校的 txt 内容回填 `work.body`，避免二次要求用户精校
+
+### 下一步计划
+- 步骤 15 全部完成，构建全部结束
 
 ---

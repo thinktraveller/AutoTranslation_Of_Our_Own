@@ -29,6 +29,10 @@ _ato3_progress.json
 .translation_checkpoint.json
 llm_calls.jsonl
 
+# 任务日志（运行时生成，不纳入版本控制；仅保留目录本身）
+logs/*
+!logs/.gitkeep
+
 # IDE
 .idea/
 .vscode/

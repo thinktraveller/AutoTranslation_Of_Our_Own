@@ -184,6 +184,9 @@ def get_profile_config(profile_name: str | None = None) -> dict:
     file_profiles: dict[str, dict] = cfg.get("profiles", {})
     # 合并：内置预设 + 文件方案（文件方案可覆盖同名内置预设）
     merged_profiles = {**_BUILTIN_PROFILES, **file_profiles}
+    # 移除被用户删除的内置方案
+    for _del in cfg.get("deleted_profiles", []):
+        merged_profiles.pop(_del, None)
 
     # 确定要使用的方案名
     name = profile_name or cfg.get("default_profile")
@@ -290,7 +293,7 @@ def _print_separator(char="─", width=50):
 
 
 def _show_current_config(config: dict) -> None:
-    """打印当前配置的可读摘要。"""
+    """打印当前配置的可读摘要（完整版，含 agent 配置）。"""
     _print_separator()
     print("当前提供商配置：")
     for name, prov in config.get("providers", {}).items():
@@ -302,6 +305,17 @@ def _show_current_config(config: dict) -> None:
     print("当前 Agent 配置：")
     for name, agent in config.get("agents", {}).items():
         print(f"  [{name}]  provider={agent['provider']}  model={agent['model']}  temperature={agent.get('temperature', 0.3)}")
+    _print_separator()
+
+
+def _show_providers_only(config: dict) -> None:
+    """打印当前提供商配置（不含 agent 配置）。"""
+    _print_separator()
+    print("当前提供商配置：")
+    for name, prov in config.get("providers", {}).items():
+        env_val = os.environ.get(prov["api_key_env"], "（未设置）")
+        key_status = "已设置" if env_val and env_val != "（未设置）" else "未设置"
+        print(f"  [{name}]  base_url={prov['base_url']}  API Key({prov['api_key_env']})={key_status}")
     _print_separator()
 
 
@@ -503,8 +517,9 @@ def _show_profiles(config: dict) -> None:
 
     file_profiles: dict = config.get("profiles", {})
     default_name: str = config.get("default_profile", "")
+    deleted: list = config.get("deleted_profiles", [])
 
-    all_names = list(builtin.keys()) + [k for k in file_profiles if k not in builtin]
+    all_names = [k for k in builtin if k not in deleted] + [k for k in file_profiles if k not in builtin]
     _print_separator()
     print("所有可用模型方案：")
     for name in all_names:
@@ -582,19 +597,47 @@ def _new_or_edit_profile(config: dict, edit_name: str | None = None) -> None:
 
 
 def _delete_profile(config: dict) -> None:
-    """删除自定义方案（内置三个方案不可删除）。"""
+    """删除方案。已有自定义方案时允许删除内置方案。"""
     print("\n--- 删除模型方案 ---")
     file_profiles: dict = config.get("profiles", {})
+    deleted: list = config.get("deleted_profiles", [])
     custom_names = [k for k in file_profiles if k not in _BUILTIN_PROFILE_NAMES]
-    if not custom_names:
-        print("当前没有可删除的自定义方案（内置方案 fast/balanced/quality 不可删除）。")
-        return
-    print("可删除的自定义方案：", custom_names)
+    remaining_builtins = [k for k in _BUILTIN_PROFILE_NAMES if k not in deleted]
+    has_custom = bool(custom_names)
+
+    # 列出可删除的方案
+    if has_custom:
+        all_deletable = remaining_builtins + custom_names
+        print("可删除的方案：", all_deletable)
+    else:
+        if not custom_names:
+            print("当前没有可删除的自定义方案（必须先创建至少一个自定义方案才能删除内置方案）。")
+            return
+        print("可删除的自定义方案：", custom_names)
+
     name = input("请输入要删除的方案名称：").strip()
     if name in _BUILTIN_PROFILE_NAMES:
-        print(f"  内置方案 '{name}' 不可删除（可在 config.json 中同名定义以覆盖其配置）。")
+        if not has_custom:
+            print(f"  内置方案 '{name}' 不可删除（必须先创建至少一个自定义方案才能删除内置方案）。")
+            return
+        confirm = input(f"  ⚠️  '{name}' 是内置方案，删除后将不再出现在可用方案列表中。确认删除？[y/N]：").strip().lower()
+        if confirm != "y":
+            print("  操作取消。")
+            return
+        # 若有覆盖定义则一并移除
+        if name in file_profiles:
+            del file_profiles[name]
+        # 写入 deleted_profiles 列表，令运行时过滤该方案
+        deleted: list = config.setdefault("deleted_profiles", [])
+        if name not in deleted:
+            deleted.append(name)
+        if config.get("default_profile") == name:
+            config["default_profile"] = "balanced" if name != "balanced" else "quality"
+            print(f"  注意：方案 '{name}' 已是 default_profile，已自动重置。")
+        save_config(config)
+        print(f"内置方案 '{name}' 已删除。")
         return
-    if name not in file_profiles:
+    elif name not in file_profiles:
         print(f"  方案 '{name}' 不存在。")
         return
 
@@ -612,7 +655,8 @@ def _set_default_profile(config: dict) -> None:
     """将某方案设为 default_profile。"""
     print("\n--- 设为默认方案 ---")
     file_profiles: dict = config.get("profiles", {})
-    all_names = list(_BUILTIN_PROFILE_NAMES) + [k for k in file_profiles if k not in _BUILTIN_PROFILE_NAMES]
+    deleted: list = config.get("deleted_profiles", [])
+    all_names = [k for k in _BUILTIN_PROFILE_NAMES if k not in deleted] + [k for k in file_profiles if k not in _BUILTIN_PROFILE_NAMES]
     print("可用方案：", all_names)
     name = input("请输入要设为默认的方案名称：").strip()
     if name not in all_names:
@@ -623,8 +667,33 @@ def _set_default_profile(config: dict) -> None:
     print(f"已将 '{name}' 设为默认方案（default_profile）。")
 
 
+def _manage_providers(config: dict) -> None:
+    """提供商管理子菜单。"""
+    while True:
+        print()
+        print("  管理提供商：")
+        print("    1. 查看当前提供商配置")
+        print("    2. 添加/修改提供商")
+        print("    3. 删除提供商")
+        print("    0. 返回主菜单")
+        sub = input("  输入编号：").strip()
+
+        config = load_config()
+        if sub == "1":
+            _show_providers_only(config)
+        elif sub == "2":
+            _edit_provider(config)
+        elif sub == "3":
+            _delete_provider(config)
+        elif sub in ("0", ""):
+            print("  返回主菜单。")
+            break
+        else:
+            print("  无效选项，请重新输入。")
+
+
 def _manage_profiles(config: dict) -> None:
-    """方案管理子菜单。"""
+    """配置 agent 的大模型方案管理子菜单。"""
     # 若当前配置仍是纯旧版结构（无 profiles），提示但不强制迁移
     if "profiles" not in config and "agents" in config:
         print()
@@ -634,34 +703,35 @@ def _manage_profiles(config: dict) -> None:
 
     while True:
         print()
-        print("  方案管理子菜单：")
-        print("    5-1. 查看所有方案")
-        print("    5-2. 新建方案")
-        print("    5-3. 编辑方案")
-        print("    5-4. 删除方案（内置三个方案不可删除）")
-        print("    5-5. 设为默认方案（修改 default_profile）")
-        print("    5-0. 返回主菜单")
-        sub = input("  输入子菜单编号：").strip()
+        print("  管理配置 agent 的大模型方案：")
+        print("    1. 查看所有方案")
+        print("    2. 新建方案")
+        print("    3. 编辑方案")
+        print("    4. 删除方案")
+        print("    5. 设为默认方案（修改 default_profile）")
+        print("    0. 返回主菜单")
+        sub = input("  输入编号：").strip()
 
         config = load_config()  # 每次操作前重新加载
-        if sub in ("5-1", "51"):
+        if sub == "1":
             _show_profiles(config)
-        elif sub in ("5-2", "52"):
+        elif sub == "2":
             _new_or_edit_profile(config, edit_name=None)
-        elif sub in ("5-3", "53"):
+        elif sub == "3":
             file_profiles: dict = config.get("profiles", {})
-            all_names = list(_BUILTIN_PROFILE_NAMES) + [k for k in file_profiles if k not in _BUILTIN_PROFILE_NAMES]
+            deleted: list = config.get("deleted_profiles", [])
+            all_names = [k for k in _BUILTIN_PROFILE_NAMES if k not in deleted] + [k for k in file_profiles if k not in _BUILTIN_PROFILE_NAMES]
             print("  可编辑方案：", all_names)
             ename = input("  请输入要编辑的方案名称：").strip()
             if ename:
                 _new_or_edit_profile(config, edit_name=ename)
             else:
                 print("  操作取消。")
-        elif sub in ("5-4", "54"):
+        elif sub == "4":
             _delete_profile(config)
-        elif sub in ("5-5", "55"):
+        elif sub == "5":
             _set_default_profile(config)
-        elif sub in ("5-0", "50", "0", ""):
+        elif sub in ("0", ""):
             print("  返回主菜单。")
             break
         else:
@@ -701,34 +771,22 @@ def run_cli() -> None:
     while True:
         print()
         print("请选择操作：")
-        print("  1. 查看当前配置")
-        print("  2. 添加/修改提供商")
-        print("  3. 添加/修改 Agent（模型/提供商/温度）")
-        print("  4. 查看/编辑 Agent 提示词")
-        print("  5. 管理模型方案（Profile）")
-        print("  6. 删除提供商")
-        print("  7. 退出")
+        print("  1. 管理提供商")
+        print("  2. 查看/编辑 Agent 提示词")
+        print("  3. 管理配置 agent 的大模型方案")
+        print("  4. 退出")
         choice = input("输入数字：").strip()
 
         if choice == "1":
             config = load_config()
-            _show_current_config(config)
+            _manage_providers(config)
         elif choice == "2":
             config = load_config()
-            _edit_provider(config)
+            _edit_agent_prompt(config)
         elif choice == "3":
             config = load_config()
-            _edit_agent(config)
-        elif choice == "4":
-            config = load_config()
-            _edit_agent_prompt(config)
-        elif choice == "5":
-            config = load_config()
             _manage_profiles(config)
-        elif choice == "6":
-            config = load_config()
-            _delete_provider(config)
-        elif choice == "7":
+        elif choice == "4":
             print("退出配置编辑器。")
             break
         else:

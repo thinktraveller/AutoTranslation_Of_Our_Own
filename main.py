@@ -16,6 +16,11 @@ main.py — ATO3 主流程入口
     --skip-term-extract     跳过术语提取，直接使用现有词典
     --profile NAME          使用指定的模型方案（fast/balanced/quality 或自定义方案名）
     --output-dir PATH       指定输出文件夹路径（默认：HTML 文件同级目录下创建同名子文件夹）
+
+断点续传：
+    任务执行期间，在三处用户介入节点（术语确认后、txt 精校后、Markdown 检视后）可输入
+    [s] 保存进度并退出。下次启动时，程序会列出未完成任务并提供恢复选项。
+    进度文件存储在 logs/{文件名}_{时间戳}/ 子目录下。
 """
 
 from __future__ import annotations
@@ -25,8 +30,10 @@ import io
 import json
 import os
 import re
+import shutil
 import signal
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import cast
 
@@ -44,7 +51,10 @@ from src.dict_manager import load_dict, save_dict, merge_dicts
 from src.term_extractor import extract_and_confirm
 from src.translator import translate_work, verify_terms, save_progress, load_progress
 from src.polisher import polish_work
-from src.output_writer import write_all, get_output_paths, _safe_stem
+from src.output_writer import (
+    write_txt, pause_for_proofread, write_markdown, pause_before_docx,
+    write_docx, get_output_paths, _safe_stem,
+)
 from src.llm_config import get_profile_config
 
 
@@ -83,6 +93,153 @@ def _save_ip_dict(ip_dict_path: Path, ip_data: dict, new_terms: dict) -> None:
         print(f'  [警告] IP 词典保存失败：{e}')
 
 
+# ── 日志文件夹与任务状态管理 ──────────────────────────────────────────────
+
+_LOGS_ROOT = Path("logs")
+_TASK_STATE_FILENAME = "task_state.json"
+_PROGRESS_FILENAME = "progress.json"
+
+# task_state.json 中 breakpoint 字段的合法值
+_BP_AFTER_TERM_CONFIRM = "after_term_confirm"
+_BP_AFTER_TXT_POLISH = "after_txt_polish"
+_BP_AFTER_MD_REVIEW = "after_md_review"
+
+# task_state.json 版本号（供未来格式升级使用）
+_TASK_STATE_VERSION = 1
+
+
+def _create_task_log_dir(html_path: str | Path) -> Path:
+    """
+    在 logs/ 下创建本次任务的子日志文件夹，命名规则：{安全词干}_{时间戳}。
+    返回创建好的 Path 对象。
+    """
+    stem = _safe_stem(Path(html_path).stem)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = _LOGS_ROOT / f"{stem}_{ts}"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir
+
+
+def _save_task_state(state: dict, log_dir: Path) -> None:
+    """
+    原子写入 task_state.json（先写 .tmp 再重命名），防止中断时文件损坏。
+    """
+    state_path = log_dir / _TASK_STATE_FILENAME
+    tmp_path = state_path.with_suffix(".tmp")
+    try:
+        tmp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(state_path)
+    except Exception as e:
+        print(f"  [断点] task_state.json 写入失败：{e}")
+
+
+def _build_initial_task_state(html_path: str | Path, args: argparse.Namespace) -> dict:
+    """根据当前参数构造初始 task_state 字典（breakpoint=null 表示进行中）。"""
+    p = Path(html_path)
+    return {
+        "version": _TASK_STATE_VERSION,
+        "html_path": str(p),
+        "html_stem": _safe_stem(p.stem),
+        "started_at": datetime.now().isoformat(),
+        "interrupted_at": None,
+        "breakpoint": None,
+        "args": {
+            "profile": args.profile,
+            "skip_polish": args.skip_polish,
+            "skip_term_extract": args.skip_term_extract,
+            "source_lang": args.source_lang,
+            "output_dir": args.output_dir,
+            "ip_dict": args.ip_dict,
+            "no_general_dict": args.no_general_dict,
+            "general_dict": args.general_dict,
+            "docx_template": args.docx_template,
+        },
+        "cache": {},
+    }
+
+
+def _breakpoint_prompt(label: str, breakpoint_key: str,
+                       task_state: dict, log_dir: Path) -> bool:
+    """
+    在用户介入节点询问是否继续。
+    返回 True 表示继续执行，False 表示用户选择保存并中断。
+    """
+    print(f"\n[断点] {label}")
+    print("  [Enter] 继续执行")
+    print("  [s]     保存进度并退出（下次启动可从此处恢复）")
+    try:
+        choice = input("请选择：").strip().lower()
+    except EOFError:
+        choice = ""
+    if choice == "s":
+        task_state["breakpoint"] = breakpoint_key
+        task_state["interrupted_at"] = datetime.now().isoformat()
+        _save_task_state(task_state, log_dir)
+        print(f"  进度已保存至 {log_dir / _TASK_STATE_FILENAME}")
+        print("  下次启动脚本时可选择恢复此任务。")
+        return False
+    return True
+
+
+def _find_incomplete_tasks() -> list[dict]:
+    """
+    扫描 logs/ 目录，返回所有 breakpoint 不为 null 的未完成任务列表（最新在前）。
+    """
+    if not _LOGS_ROOT.exists():
+        return []
+    incomplete: list[dict] = []
+    for sub in sorted(_LOGS_ROOT.iterdir(), reverse=True):
+        if not sub.is_dir():
+            continue
+        state_file = sub / _TASK_STATE_FILENAME
+        if not state_file.exists():
+            continue
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(state, dict) and state.get("breakpoint") is not None:
+            incomplete.append({**state, "_log_dir": str(sub)})
+    return incomplete
+
+
+def _prompt_resume(incomplete: list[dict]) -> dict | None:
+    """
+    列出未完成任务，让用户选择：数字恢复、d<序号>删除、回车忽略。
+    返回要恢复的 state dict，或 None（忽略/删除后不恢复）。
+    """
+    print("\n发现以下未完成的翻译任务：\n")
+    _BP_CN = {
+        _BP_AFTER_TERM_CONFIRM: "术语确认后",
+        _BP_AFTER_TXT_POLISH:   "txt 精校后",
+        _BP_AFTER_MD_REVIEW:    "Markdown 检视后",
+    }
+    for i, s in enumerate(incomplete, 1):
+        bp_cn = _BP_CN.get(s.get("breakpoint", ""), s.get("breakpoint", ""))
+        print(f"  [{i}] {s.get('html_stem', '?')}  "
+              f"中断：{s.get('interrupted_at', '?')}  断点：{bp_cn}")
+    print("  [d<序号>] 删除对应任务记录（如 d1）")
+    print("  [Enter]   忽略，开始新任务")
+    try:
+        choice = input("\n请选择：").strip().lower()
+    except EOFError:
+        return None
+    if not choice:
+        return None
+    if choice.startswith("d") and choice[1:].isdigit():
+        idx = int(choice[1:]) - 1
+        if 0 <= idx < len(incomplete):
+            log_dir = incomplete[idx]["_log_dir"]
+            shutil.rmtree(log_dir, ignore_errors=True)
+            print(f"  已删除：{log_dir}")
+        return None
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(incomplete):
+            return incomplete[idx]
+    return None
+
+
 # ── 统一断点续传检查点 ─────────────────────────────────────────────────────
 
 # 检查点文件名（固定，不随输入文件名变化）
@@ -94,8 +251,13 @@ _PHASE_BODY = "body"              # 正文翻译
 _PHASE_POLISH = "polish"          # 润色（完成标记，无段落数据）
 
 
-def _checkpoint_path(html_path: Path) -> Path:
-    """返回检查点文件的绝对路径（与输入文件同目录）。"""
+def _checkpoint_path(html_path: Path, log_dir: Path | None = None) -> Path:
+    """
+    返回检查点文件（progress.json）的绝对路径。
+    若提供 log_dir，将文件放在子日志文件夹内；否则回退到 HTML 同目录（兼容旧检查点）。
+    """
+    if log_dir is not None:
+        return log_dir / _PROGRESS_FILENAME
     return html_path.parent / _CHECKPOINT_FILENAME
 
 
@@ -349,8 +511,48 @@ def _interactive_input() -> list[str]:
 # ── 主流程 ────────────────────────────────────────────────────────────────
 
 def main(argv=None) -> int:
+    # ── 启动时扫描未完成任务（仅在无参数/交互模式时扫描）──────────────────
+    _resume_state: dict | None = None
+    _resume_log_dir: Path | None = None
+
     if argv is None and len(sys.argv) == 1:
-        argv = _interactive_input()
+        # 先扫描，再进入交互式输入
+        _incomplete = _find_incomplete_tasks()
+        if _incomplete:
+            _resume_state = _prompt_resume(_incomplete)
+            if _resume_state is not None:
+                # 从保存的 args 重建 argv，跳过交互模式
+                _saved_args = _resume_state.get("args", {})
+                _resume_log_dir = Path(_resume_state["_log_dir"])
+                _rebuild_argv: list[str] = [_resume_state["html_path"]]
+                if _saved_args.get("profile"):
+                    _rebuild_argv.extend(["--profile", _saved_args["profile"]])
+                if _saved_args.get("skip_polish"):
+                    _rebuild_argv.append("--skip-polish")
+                if _saved_args.get("skip_term_extract"):
+                    _rebuild_argv.append("--skip-term-extract")
+                if _saved_args.get("source_lang") and _saved_args["source_lang"] != "en":
+                    _rebuild_argv.extend(["--source-lang", _saved_args["source_lang"]])
+                if _saved_args.get("output_dir"):
+                    _rebuild_argv.extend(["--output-dir", _saved_args["output_dir"]])
+                if _saved_args.get("ip_dict"):
+                    _rebuild_argv.extend(["--ip-dict", _saved_args["ip_dict"]])
+                if _saved_args.get("no_general_dict"):
+                    _rebuild_argv.append("--no-general-dict")
+                if _saved_args.get("general_dict"):
+                    _rebuild_argv.extend(["--general-dict", _saved_args["general_dict"]])
+                if _saved_args.get("docx_template"):
+                    _rebuild_argv.extend(["--docx-template", _saved_args["docx_template"]])
+                argv = _rebuild_argv
+                print(f"\n[恢复] 从断点恢复任务：{_resume_state.get('html_stem', '?')}")
+                print(f"  断点位置：{_resume_state.get('breakpoint')}")
+                print(f"  日志目录：{_resume_log_dir}")
+            else:
+                # 用户选择忽略或删除，正常进入交互模式
+                argv = _interactive_input()
+        else:
+            argv = _interactive_input()
+
     args = _parse_args(argv)
 
     # ── 加载模型方案配置（四级优先级：--profile > default_profile > agents > 硬编码）──
@@ -387,8 +589,29 @@ def main(argv=None) -> int:
         print(f'[警告] 文件扩展名不是 .html/.htm，仍尝试解析：{html_path}')
     print(f'  输入文件：{html_path.resolve()}')
 
-    # ── 统一断点续传检查点（四阶段共用）───────────────────────────────────
-    ckpt_path = _checkpoint_path(html_path)
+    # ── 创建（或恢复）子日志文件夹 ─────────────────────────────────────────
+    if _resume_log_dir is not None and _resume_log_dir.exists():
+        task_log_dir = _resume_log_dir
+        print(f'  [日志] 使用已有日志目录：{task_log_dir}')
+    else:
+        task_log_dir = _create_task_log_dir(html_path)
+        print(f'  [日志] 任务日志目录：{task_log_dir}')
+
+    # ── 初始化任务状态（task_state.json）─────────────────────────────────
+    if _resume_state is not None:
+        # 恢复：沿用已有 state，清空断点标记，更新启动时间
+        task_state = dict(_resume_state)
+        task_state.pop("_log_dir", None)
+        task_state["breakpoint"] = None
+        task_state["interrupted_at"] = None
+        task_state["started_at"] = datetime.now().isoformat()
+    else:
+        task_state = _build_initial_task_state(html_path, args)
+
+    _save_task_state(task_state, task_log_dir)
+
+    # ── 统一断点续传检查点（四阶段共用，迁移到子日志文件夹）──────────────
+    ckpt_path = _checkpoint_path(html_path, log_dir=task_log_dir)
     ckpt = _load_checkpoint(ckpt_path)
     source_key = html_path.name  # 用于校验检查点是否匹配当前文件
 
@@ -531,6 +754,20 @@ def main(argv=None) -> int:
         if session_terms:
             term_map.update(session_terms)
             print(f'  临时术语表：{len(session_terms)} 条（仅本次翻译有效，不写入词典）。')
+
+        # ── 断点 1：术语确认后 ────────────────────────────────────────────
+        # 仅在不是从该断点恢复时显示（避免恢复时重复询问）
+        _resuming_bp = _resume_state.get("breakpoint") if _resume_state else None
+        if _resuming_bp != _BP_AFTER_TERM_CONFIRM:
+            task_state["cache"]["terms_log_path"] = str(task_log_dir / "terms_extracted.json")
+            _save_task_state(task_state, task_log_dir)
+            if not _breakpoint_prompt(
+                "术语确认完成。请检查 IP 词典，按 Enter 继续翻译...",
+                _BP_AFTER_TERM_CONFIRM,
+                task_state,
+                task_log_dir,
+            ):
+                return 0
     else:
         session_terms = {}
         print('\n[跳过] 术语提取（--skip-term-extract）')
@@ -644,16 +881,106 @@ def main(argv=None) -> int:
         print('\n[跳过] 润色（--skip-polish）')
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # 7. 输出 txt / Markdown / docx
+    # 7. 输出 txt / Markdown / docx（逐步执行，含两处断点）
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    step('输出文件（txt → 精校暂停 → Markdown → 检视暂停 → docx）')
+    step('输出文件（txt → 精校断点 → Markdown → 检视断点 → docx）')
     reference_doc = Path(args.docx_template) if args.docx_template else None
     output_dir = args.output_dir if args.output_dir else None
+    output_paths = get_output_paths(html_path, output_dir=output_dir)
+    task_state["cache"]["output_dir"] = str(output_paths["txt"].parent)
+    _save_task_state(task_state, task_log_dir)
+
+    _resuming_bp = _resume_state.get("breakpoint") if _resume_state else None
+
+    # ── 7-A: 写 txt ───────────────────────────────────────────────────────
+    # 从 after_txt_polish 或 after_md_review 断点恢复时，txt 已存在，跳过
+    _skip_txt = (
+        _resuming_bp in (_BP_AFTER_TXT_POLISH, _BP_AFTER_MD_REVIEW)
+        and output_paths["txt"].exists()
+    )
+    if not _skip_txt:
+        try:
+            write_txt(work, output_paths["txt"])
+        except Exception as e:
+            print(f'[错误] txt 输出失败：{e}')
+            return 1
+    else:
+        print(f'  [跳过] txt 已存在（来自断点恢复）：{output_paths["txt"]}')
+
+    # ── 7-B: 精校暂停 + 断点 2（after_txt_polish）────────────────────────
+    # after_txt_polish：用户已精校 txt，直接读取精校内容跳过暂停
+    # after_md_review：md 已生成，跳过精校和 md 生成
+    _skip_proofread = (
+        _resuming_bp in (_BP_AFTER_TXT_POLISH, _BP_AFTER_MD_REVIEW)
+        and output_paths["txt"].exists()
+    )
+    if not _skip_proofread:
+        proofread_paragraphs = pause_for_proofread(output_paths["txt"])
+        body_count = sum(1 for b in work.body if b.translation)
+        if len(proofread_paragraphs) != body_count:
+            print(
+                f'[警告] 精校后段落数（{len(proofread_paragraphs)}）'
+                f'与原始正文段落数（{body_count}）不一致。'
+            )
+            try:
+                cont = input('是否继续？(y/n): ').strip().lower()
+            except EOFError:
+                cont = 'y'
+            if cont != 'y':
+                print('已取消。txt 文件保留，md 和 docx 未生成。')
+                return 0
+        for i, block in enumerate(work.body):
+            if i < len(proofread_paragraphs):
+                block.translation = proofread_paragraphs[i]
+
+        # 断点 2
+        if not _breakpoint_prompt(
+            "txt 已生成，请精校正文后按 Enter 继续生成 Markdown...",
+            _BP_AFTER_TXT_POLISH,
+            task_state,
+            task_log_dir,
+        ):
+            return 0
+    else:
+        # 从断点恢复：读取已精校的 txt 内容，回填 work.body
+        _txt = output_paths["txt"].read_text(encoding="utf-8")
+        proofread_paragraphs = [p.strip() for p in _txt.split("\n\n") if p.strip()]
+        for i, block in enumerate(work.body):
+            if i < len(proofread_paragraphs):
+                block.translation = proofread_paragraphs[i]
+        print(f'  [恢复] 已读取精校 txt（{len(proofread_paragraphs)} 段）')
+
+    # ── 7-C: 写 Markdown ──────────────────────────────────────────────────
+    _skip_md = _resuming_bp == _BP_AFTER_MD_REVIEW and output_paths["md"].exists()
+    if not _skip_md:
+        try:
+            write_markdown(work, output_paths["md"])
+        except Exception as e:
+            print(f'[错误] Markdown 输出失败：{e}')
+            return 1
+    else:
+        print(f'  [跳过] Markdown 已存在（来自断点恢复）：{output_paths["md"]}')
+
+    # 断点 3（after_md_review）
+    if not _breakpoint_prompt(
+        "Markdown 已生成，请检视格式后按 Enter 继续生成 docx...",
+        _BP_AFTER_MD_REVIEW,
+        task_state,
+        task_log_dir,
+    ):
+        return 0
+
+    # ── 7-D: 写 docx ──────────────────────────────────────────────────────
     try:
-        output_paths = write_all(work, html_path, reference_doc=reference_doc, output_dir=output_dir)
+        write_docx(output_paths["md"], output_paths["docx"], reference_doc=reference_doc)
     except Exception as e:
-        print(f'[错误] 输出失败：{e}')
-        return 1
+        print(f'[错误] docx 输出失败：{e}')
+        # docx 失败不算致命，继续输出完成摘要
+
+    print('\n[完成] 三种格式已全部生成：')
+    print(f'  txt  → {output_paths["txt"]}')
+    print(f'  md   → {output_paths["md"]}')
+    print(f'  docx → {output_paths["docx"]}')
 
     # ── 清理检查点文件（翻译全部完成）────────────────────────────────────
     if ckpt_path.exists():
@@ -662,6 +989,11 @@ def main(argv=None) -> int:
             print(f'  [清理] 已删除断点续传检查点：{ckpt_path}')
         except Exception:
             pass
+
+    # ── 标记任务完成（breakpoint=null）────────────────────────────────────
+    task_state["breakpoint"] = None
+    task_state["interrupted_at"] = None
+    _save_task_state(task_state, task_log_dir)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # 8. 完成摘要
