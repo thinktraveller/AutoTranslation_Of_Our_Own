@@ -2,7 +2,7 @@
   "meta": {
     "name": "通用词典",
     "version": "1.0",
-    "updated": "2026-06-04"
+    "updated": "2026-06-05"
   },
   "terms": {
     "Archive of Our Own": "AO3",
@@ -24,6 +24,8 @@
     "one-shot": "短篇",
     "multi-chapter": "多章节",
     "WIP": "未完结",
-    "work in progress": "未完结"
+    "work in progress": "未完结",
+    "F/F": "女/女",
+    "Creator Chose Not To Use Archive Warnings": "作者选择不声明雷点"
   }
 }

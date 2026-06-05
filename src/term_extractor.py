@@ -492,7 +492,7 @@ if __name__ == "__main__":
 
     # 运行提取 + 确认
     try:
-        confirmed = extract_and_confirm(demo_blocks, agent=agent_name)
+        confirmed, session_terms = extract_and_confirm(demo_blocks, agent=agent_name)
     except (ImportError, EnvironmentError, KeyError) as e:
         print(f"[错误] {e}")
         sys.exit(1)
@@ -504,3 +504,9 @@ if __name__ == "__main__":
             print(f"  {orig}  ->  {trans}")
     else:
         print("未确认任何术语。")
+
+    if session_terms:
+        print()
+        print("仅本次使用的术语（不写入词典）：")
+        for orig, trans in session_terms.items():
+            print(f"  {orig}  ->  {trans}")

@@ -240,3 +240,49 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 ### 下一步计划
 - ✅ 步骤 11 全部子项（B-1 至 B-7、O-1 至 O-3）已完成，构建全部结束
+
+---
+
+## [2026-06-05 09:50] 修复：三处步骤 11 引入的遗留 Bug
+
+### 问题描述
+
+**Bug A：term_extractor.py CLI __main__ 块 AttributeError 崩溃**
+- 现象：直接运行 `python src/term_extractor.py <html>` 时，若提取到术语进入确认流程后报 `AttributeError: 'tuple' object has no attribute 'items'`
+- 影响范围：CLI 直接测试入口；通过 main.py 调用的正常流程不受影响
+
+**Bug B：llm_config.py _edit_agent() 编辑 agent 时丢失自定义字段**
+- 现象：在配置编辑器（选项 3）中修改 polisher 的模型或温度后，`polish_batch_mode`、`polish_context_token_limit`、`system_prompt` 等自定义字段被清空
+- 影响范围：所有通过 CLI 编辑器修改过 agent 配置的场景；首次创建 agent 不受影响
+
+**Bug C：dicts/general.json 新增词条未提交且缺少末尾换行**
+- 现象：F/F → 女/女 和 Creator Chose Not To Use Archive Warnings → 作者选择不声明雷点 两条词条已添加到文件但未纳入版本控制；文件末尾缺少换行符
+- 影响范围：词典内容可用但版本不一致
+
+### 根本原因
+
+**Bug A**：步骤 11 的 B-2 修复将 `extract_and_confirm()` 返回值从 `dict` 改为 `tuple[dict, dict]`，但 `__main__` 演示块仍按旧接口接收单个返回值，导致后续的 `.items()` 调用作用于 tuple 对象。
+
+**Bug B**：`_edit_agent()` 函数直接用 `{"provider": ..., "model": ..., "temperature": ...}` 字典覆盖整个 agent 条目，而不是在现有条目上更新，因此凡不在这三个字段中的自定义键（如 `polish_batch_mode`）全部丢失。
+
+**Bug C**：步骤 11 在 general.json 中补充了两条新术语，但未提交；同时 save_dict 函数使用 json.dump 写入，末尾不带换行，与文件既有格式不一致。
+
+### 修复方案
+
+**Bug A**：将 `confirmed = extract_and_confirm(...)` 改为 `confirmed, session_terms = extract_and_confirm(...)`，并在演示块末尾同时打印 `session_terms` 内容。
+
+**Bug B**：`_edit_agent()` 中先获取 `existing_agent = config["agents"].get(name, {})`，再以 `{**existing_agent}` 为基础更新三个基础字段，保留所有其他自定义键不变。
+
+**Bug C**：在 general.json 末尾补充换行符，并将两条新术语一并提交到版本控制。
+
+### 变更文件
+- `src/term_extractor.py`：`__main__` 块改用元组拆包接收 `extract_and_confirm` 返回值，补充 session_terms 打印
+- `src/llm_config.py`：`_edit_agent()` 改为在现有配置基础上更新，保留自定义字段
+- `dicts/general.json`：补充末尾换行符，纳入已有的两条新术语
+
+### 验证方法
+- Bug A：`python src/term_extractor.py test/Tease_Test_Taste.html` 可正常运行至确认界面，无 AttributeError
+- Bug B：在 llm_config CLI 编辑 polisher agent 的温度后，config.json 中 `polish_batch_mode` 字段仍存在
+- Bug C：`git status` 显示 dicts/general.json 已提交，文件末尾有换行符
+
+---

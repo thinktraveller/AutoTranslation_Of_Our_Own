@@ -257,7 +257,13 @@ def _edit_agent(config: dict) -> None:
     temp_str = input(f"temperature [{default_temp}]：").strip()
     temperature = float(temp_str) if temp_str else default_temp
 
-    config["agents"][name] = {"provider": provider, "model": model, "temperature": temperature}
+    # 保留已有自定义字段（如 polish_batch_mode、polish_context_token_limit、system_prompt）
+    existing_agent = config.get("agents", {}).get(name, {})
+    updated_agent = {**existing_agent}
+    updated_agent["provider"] = provider
+    updated_agent["model"] = model
+    updated_agent["temperature"] = temperature
+    config["agents"][name] = updated_agent
     save_config(config)
     print(f"Agent '{name}' 已保存。")
 
