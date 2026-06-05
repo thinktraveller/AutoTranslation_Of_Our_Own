@@ -26,6 +26,7 @@ polisher.py — 润色 agent
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,49 @@ try:
 except ImportError:
     get_client = None  # type: ignore[assignment]
     get_agent_config = None  # type: ignore[assignment]
+
+try:
+    from .llm_logger import log_call as _log_call
+except ImportError:
+    _log_call = None  # type: ignore[assignment]
+
+# ---------------------------------------------------------------------------
+# 耗时格式化与心跳计时器（与 translator.py 保持一致）
+# ---------------------------------------------------------------------------
+
+def _fmt_elapsed(seconds: float) -> str:
+    """将秒数格式化为可读耗时字符串。不足 60 秒显示 'Xs'，否则显示 'XmYs'。"""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    return f"{s // 60}m{s % 60:02d}s"
+
+
+class _HeartbeatTimer:
+    """在后台每隔 interval 秒打印一次「仍在进行」提示，直到调用 stop()。"""
+
+    def __init__(self, label: str, interval: int = 60):
+        self._label = label
+        self._interval = interval
+        self._stop_event = threading.Event()
+        self._start_time = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._start_time = time.monotonic()
+        self._thread.start()
+
+    def stop(self) -> float:
+        """停止心跳，返回从 start() 到 stop() 的总秒数。"""
+        self._stop_event.set()
+        self._thread.join()
+        return time.monotonic() - self._start_time
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(timeout=self._interval):
+            elapsed = time.monotonic() - self._start_time
+            print(f"[等待] {self._label}仍在进行，已等待 {_fmt_elapsed(elapsed)}...", flush=True)
+
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -91,33 +135,108 @@ _SYSTEM_PROMPT_TEMPLATE = """\
 # ---------------------------------------------------------------------------
 
 
-def _call_llm(text: str, client, agent_cfg: dict, system_prompt: str | None = None) -> str | None:
+def _call_llm(
+    text: str,
+    client,
+    agent_cfg: dict,
+    system_prompt: str | None = None,
+    label: str = "润色",
+    timeout: int = 120,
+    batch_index: int = 1,
+    total_batches: int = 1,
+) -> str | None:
     """
     向 LLM 发送润色请求，返回润色后的文本字符串。
-    带指数退避重试（最多 MAX_RETRIES 次）。
+    带指数退避重试（最多 MAX_RETRIES 次）和心跳计时器。
     所有重试均失败时返回 None。
     system_prompt 为 None 时使用默认英文提示词。
+    每次调用结果均写入 llm_calls.jsonl 日志。
     """
     if system_prompt is None:
         system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(source_lang=_get_lang_name("en"))
+
+    model_name = agent_cfg.get("model", "unknown")
+    agent_name = agent_cfg.get("_agent_name", "polisher")
+    input_chars = len(text)
+
     for attempt in range(1, MAX_RETRIES + 1):
+        hb = _HeartbeatTimer(label=label)
+        hb.start()
         try:
             response = client.chat.completions.create(
-                model=agent_cfg["model"],
+                model=model_name,
                 temperature=agent_cfg["temperature"],
+                timeout=timeout,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text},
                 ],
             )
-            return response.choices[0].message.content.strip()
+            elapsed = hb.stop()
+            result_text = response.choices[0].message.content.strip()
+            print(f"[完成] {label}完成（耗时 {_fmt_elapsed(elapsed)}）", flush=True)
+            # 写入成功日志
+            if _log_call is not None:
+                log_line = _log_call(
+                    phase="polish",
+                    agent=agent_name,
+                    model=model_name,
+                    batch_index=batch_index,
+                    total_batches=total_batches,
+                    input_chars=input_chars,
+                    output_chars=len(result_text),
+                    elapsed_s=elapsed,
+                    success=True,
+                    error=None,
+                )
+                print(f"  [日志] llm_calls.jsonl 第 {log_line} 行", flush=True)
+            return result_text
         except Exception as e:
+            elapsed = hb.stop()
+            err_str = str(e)
+            is_timeout = (
+                "timeout" in err_str.lower()
+                or "timed out" in err_str.lower()
+                or type(e).__name__ in ("APITimeoutError", "Timeout", "ConnectTimeout", "ReadTimeout")
+            )
+            # 写入失败日志
+            if _log_call is not None:
+                log_line = _log_call(
+                    phase="polish",
+                    agent=agent_name,
+                    model=model_name,
+                    batch_index=batch_index,
+                    total_batches=total_batches,
+                    input_chars=input_chars,
+                    output_chars=0,
+                    elapsed_s=elapsed,
+                    success=False,
+                    error=err_str[:500],
+                )
+            else:
+                log_line = None
+
             if attempt < MAX_RETRIES:
                 wait = 2 ** attempt  # 2, 4 秒
-                print(f"  [润色] 第 {attempt} 次请求失败：{e}，{wait} 秒后重试...")
+                if is_timeout:
+                    print(
+                        f"  [润色] 第 {attempt} 次请求超时（超过 {timeout}s）"
+                        f"，{wait} 秒后重试..."
+                    )
+                else:
+                    print(f"  [润色] 第 {attempt} 次请求失败：{e}，{wait} 秒后重试...")
                 time.sleep(wait)
             else:
-                print(f"  [润色] 请求失败（已重试 {MAX_RETRIES} 次）：{e}")
+                if is_timeout:
+                    print(
+                        f"  [润色] 请求超时（已重试 {MAX_RETRIES} 次，每次超过 {timeout}s）。\n"
+                        f"  提示：可在 config.json agents.polisher.timeout 中调大超时秒数，\n"
+                        f"        或检查网络连通性后重新运行。"
+                    )
+                else:
+                    print(f"  [润色] 请求失败（已重试 {MAX_RETRIES} 次）：{e}")
+                if log_line is not None:
+                    print(f"  [日志] 详情见 llm_calls.jsonl 第 {log_line} 行")
                 return None
     return None
 
@@ -134,6 +253,7 @@ def _polish_batch(
     batch_index: int,
     total_batches: int,
     system_prompt: str | None = None,
+    timeout: int = 120,
 ) -> None:
     """
     润色一批 TranslatableBlock，就地覆盖 translation 字段。
@@ -150,27 +270,37 @@ def _polish_batch(
 
     # 单段直接润色，不使用分隔符
     if len(valid) == 1:
-        print(f"  批次 {batch_index}/{total_batches}（1 段）...", end=" ", flush=True)
-        result = _call_llm(valid[0].translation, client, agent_cfg, system_prompt=system_prompt)
-        if result is not None:
-            valid[0].translation = result
-            print("完成")
+        label = f"第 {batch_index} 段润色"
+        print(f"  批次 {batch_index}/{total_batches}（1 段）...")
+        result = _call_llm(
+            valid[0].translation, client, agent_cfg,
+            system_prompt=system_prompt, label=label, timeout=timeout,
+            batch_index=batch_index, total_batches=total_batches,
+        )
+        if result is None:
+            print("  失败，保留原译文")
         else:
-            print("失败，保留原译文")
+            valid[0].translation = result
         return
 
     # 多段合并润色
     combined = f"\n\n{PARAGRAPH_SEP}\n\n".join(b.translation for b in valid)
+    label = f"第 {batch_index} 批润色"
     print(
-        f"  批次 {batch_index}/{total_batches}（{len(valid)} 段，{len(combined)} 字符）...",
-        end=" ",
-        flush=True,
+        f"  批次 {batch_index}/{total_batches}（{len(valid)} 段，{len(combined)} 字符）..."
     )
-    raw_result = _call_llm(combined, client, agent_cfg, system_prompt=system_prompt)
+    raw_result = _call_llm(
+        combined, client, agent_cfg,
+        system_prompt=system_prompt, label=label, timeout=timeout,
+        batch_index=batch_index, total_batches=total_batches,
+    )
 
     if raw_result is None:
-        print("失败，批次降级为逐段润色...")
-        _fallback_polish_one_by_one(valid, client, agent_cfg, system_prompt=system_prompt)
+        print("  失败，批次降级为逐段润色...")
+        _fallback_polish_one_by_one(
+            valid, client, agent_cfg, system_prompt=system_prompt, timeout=timeout,
+            batch_offset=batch_index, total_batches=total_batches,
+        )
         return
 
     # 按分隔符拆分润色结果
@@ -178,14 +308,16 @@ def _polish_batch(
 
     if len(parts) != len(valid):
         print(
-            f"段落数不匹配（期望 {len(valid)}，实际 {len(parts)}），降级为逐段润色..."
+            f"  段落数不匹配（期望 {len(valid)}，实际 {len(parts)}），降级为逐段润色..."
         )
-        _fallback_polish_one_by_one(valid, client, agent_cfg, system_prompt=system_prompt)
+        _fallback_polish_one_by_one(
+            valid, client, agent_cfg, system_prompt=system_prompt, timeout=timeout,
+            batch_offset=batch_index, total_batches=total_batches,
+        )
         return
 
     for block, polished_text in zip(valid, parts):
         block.translation = polished_text
-    print("完成")
 
 
 def _fallback_polish_one_by_one(
@@ -193,18 +325,25 @@ def _fallback_polish_one_by_one(
     client,
     agent_cfg: dict,
     system_prompt: str | None = None,
+    timeout: int = 120,
+    batch_offset: int = 1,
+    total_batches: int = 1,
 ) -> None:
     """降级方案：对批次中每段逐一单独润色。"""
     for i, block in enumerate(batch, 1):
         if not block.translation or not block.translation.strip():
             continue
-        print(f"    降级润色第 {i}/{len(batch)} 段...", end=" ", flush=True)
-        result = _call_llm(block.translation, client, agent_cfg, system_prompt=system_prompt)
+        label = f"降级润色第 {i}/{len(batch)} 段"
+        print(f"    {label}...")
+        result = _call_llm(
+            block.translation, client, agent_cfg,
+            system_prompt=system_prompt, label=label, timeout=timeout,
+            batch_index=batch_offset, total_batches=total_batches,
+        )
         if result is not None:
             block.translation = result
-            print("完成")
         else:
-            print("失败，保留原译文")
+            print("    失败，保留原译文")
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +357,7 @@ def _polish_full(
     agent_cfg: dict,
     system_prompt: str,
     token_limit: int,
+    timeout: int = 120,
 ) -> None:
     """
     全文模式润色：将全部有译文段落拼为一个请求。
@@ -235,13 +375,13 @@ def _polish_full(
             f"[润色] 全文模式：估算 token 数 ~{estimated_tokens} 超过限制 {token_limit}，"
             f"自动降级为段落模式。"
         )
-        _polish_paragraph_mode(blocks, client, agent_cfg, system_prompt)
+        _polish_paragraph_mode(blocks, client, agent_cfg, system_prompt, timeout=timeout)
         return
 
     print(
         f"[润色] 全文模式：{len(translatable)} 段，约 {estimated_tokens} tokens，发送单次请求..."
     )
-    _polish_batch(translatable, client, agent_cfg, 1, 1, system_prompt=system_prompt)
+    _polish_batch(translatable, client, agent_cfg, 1, 1, system_prompt=system_prompt, timeout=timeout)
 
 
 def _polish_chapter_mode(
@@ -250,6 +390,7 @@ def _polish_chapter_mode(
     agent_cfg: dict,
     system_prompt: str,
     token_limit: int,
+    timeout: int = 120,
 ) -> None:
     """
     章节模式润色：每章作为一个请求。
@@ -266,14 +407,12 @@ def _polish_chapter_mode(
             print(
                 f"[润色] 章节模式：第 {ch_idx}/{total_ch} 章（~{estimated} tokens 超限），降级为段落模式..."
             )
-            _polish_paragraph_mode(ch_blocks, client, agent_cfg, system_prompt)
+            _polish_paragraph_mode(ch_blocks, client, agent_cfg, system_prompt, timeout=timeout)
         else:
             print(
-                f"[润色] 章节模式：第 {ch_idx}/{total_ch} 章（{len(translatable)} 段，~{estimated} tokens）...",
-                end=" ",
-                flush=True,
+                f"[润色] 章节模式：第 {ch_idx}/{total_ch} 章（{len(translatable)} 段，~{estimated} tokens）..."
             )
-            _polish_batch(translatable, client, agent_cfg, ch_idx, total_ch, system_prompt=system_prompt)
+            _polish_batch(translatable, client, agent_cfg, ch_idx, total_ch, system_prompt=system_prompt, timeout=timeout)
 
 
 def _polish_paragraph_mode(
@@ -281,6 +420,7 @@ def _polish_paragraph_mode(
     client,
     agent_cfg: dict,
     system_prompt: str,
+    timeout: int = 120,
 ) -> None:
     """段落模式润色（原有逻辑，每批最多 BATCH_SIZE 段）。"""
     translatable = [b for b in blocks if b.translation and b.translation.strip()]
@@ -290,7 +430,7 @@ def _polish_paragraph_mode(
     for i in range(0, len(translatable), BATCH_SIZE):
         batch = translatable[i : i + BATCH_SIZE]
         batch_index = i // BATCH_SIZE + 1
-        _polish_batch(batch, client, agent_cfg, batch_index, total_batches, system_prompt=system_prompt)
+        _polish_batch(batch, client, agent_cfg, batch_index, total_batches, system_prompt=system_prompt, timeout=timeout)
 
 
 def polish_blocks(
@@ -341,17 +481,22 @@ def polish_blocks(
             "llm_config 模块未找到，请确认项目根目录下存在 llm_config.py。"
         )
     client, agent_cfg = get_client(agent)
+    # 注入 agent 名称，供 _call_llm 写日志时使用
+    agent_cfg = dict(agent_cfg)
+    agent_cfg["_agent_name"] = agent
 
-    # 从 config 读取批次模式和自定义提示词（默认 paragraph）
+    # 从 config 读取批次模式、自定义提示词和超时时间（默认 paragraph / 60000 / 120s）
     batch_mode: str = "paragraph"
     token_limit: int = 60000
     custom_prompt: str | None = None
+    llm_timeout: int = 120
     try:
         if get_agent_config is not None:
             cfg = get_agent_config(agent)
             batch_mode = cfg.get("polish_batch_mode", "paragraph")
             token_limit = int(cfg.get("polish_context_token_limit", 60000))
             custom_prompt = cfg.get("system_prompt") or None
+            llm_timeout = int(cfg.get("timeout", 120))
     except Exception:
         pass  # 读取失败时静默回退为 paragraph 模式
 
@@ -364,16 +509,16 @@ def polish_blocks(
     )
 
     if batch_mode == "full":
-        _polish_full(blocks, client, agent_cfg, system_prompt, token_limit)
+        _polish_full(blocks, client, agent_cfg, system_prompt, token_limit, timeout=llm_timeout)
     elif batch_mode == "chapter":
         if chapters:
-            _polish_chapter_mode(chapters, client, agent_cfg, system_prompt, token_limit)
+            _polish_chapter_mode(chapters, client, agent_cfg, system_prompt, token_limit, timeout=llm_timeout)
         else:
             print("[润色] chapter 模式需要章节数据，降级为 paragraph 模式。")
-            _polish_paragraph_mode(blocks, client, agent_cfg, system_prompt)
+            _polish_paragraph_mode(blocks, client, agent_cfg, system_prompt, timeout=llm_timeout)
     else:
         # paragraph 模式（默认）
-        _polish_paragraph_mode(blocks, client, agent_cfg, system_prompt)
+        _polish_paragraph_mode(blocks, client, agent_cfg, system_prompt, timeout=llm_timeout)
 
     print(f"[润色] 完成，共润色 {len(translatable)} 段。")
 

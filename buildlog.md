@@ -308,3 +308,59 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 - ✅ 本轮修复完成
 
 ---
+
+## [2026-06-05] 步骤 12 完成：调用日志、超时报错、断点续翻、批次心跳
+
+### 执行的任务
+
+**子项 12-1：完整调用日志（src/llm_logger.py，JSONL 格式）**
+- 新建 `src/llm_logger.py`，提供 `log_call()` / `get_recent_entries()` / `get_log_path()` 三个公开接口
+- 日志文件：项目根目录 `llm_calls.jsonl`，每次 LLM 调用追加一条 JSON 记录
+- 记录字段：timestamp / phase / agent / model / batch_index / total_batches / input_chars / output_chars / elapsed_s / success / error / log_line
+- `log_line` 字段记录本条日志的行号（1-based），失败时可直接在错误提示中引用
+- 线程安全：内置 `_write_lock` 防止心跳线程与主线程并发写入冲突
+- 写入失败不阻断主流程（仅打印警告）
+- `llm_calls.jsonl` 加入 `.gitignore`，不纳入版本控制
+
+**子项 12-2：超时报错（timeout 注入 + 清晰提示 + 打印日志行号 + 续翻说明）**
+- `translator.py`、`polisher.py`、`term_extractor.py` 的 `_call_llm` 均已从 `agent_cfg.timeout` 读取超时秒数（默认 120）
+- 超时异常检测：匹配异常类型名（APITimeoutError / Timeout / ConnectTimeout / ReadTimeout）及消息中的 "timeout" / "timed out"
+- 超时时打印友好提示，含配置项位置（config.json agents.<name>.timeout）和"进度已自动保存，将从断点继续"说明
+- 失败时同时打印日志行号（`llm_calls.jsonl 第 N 行`），便于排查
+- 每次调用（成功/失败）均写入 JSONL 日志，并在控制台打印日志行号
+
+**子项 12-3：断点续翻（统一 .translation_checkpoint.json，覆盖四阶段）**
+- `main.py` 引入统一检查点 `.translation_checkpoint.json`（与输入 HTML 同目录）
+- 检查点结构：`{source_file, phases: {non_body: {done, translations}, body: {done, translations}, polish: {done}}}`
+- 四个阶段均有独立的完成标记（`done: bool`）和段落数据（`translations: {block_id: text}`）
+- 每阶段完成后立即写入检查点；重新运行时自动恢复所有阶段的已完成译文
+- 若检查点 `source_file` 与当前输入文件不符，自动丢弃旧检查点（避免不同文件混用）
+- 翻译全部完成后（输出文件写出后）自动删除检查点
+- 新增辅助函数：`_checkpoint_path()` / `_load_checkpoint()` / `_save_checkpoint()` / `_blocks_to_translations()` / `_restore_from_translations()`
+- 废弃旧的 `{stem}_progress.json`，统一使用新检查点（`.gitignore` 同步更新）
+- `KeyboardInterrupt` 在各翻译阶段均向上传播，由信号处理器统一接管
+- Ctrl+C 信号处理器（`_sigint_handler`）：捕获 SIGINT → 保存当前进度到检查点 → 打印续翻命令 → 退出码 130
+
+**子项 12-4：批次进度心跳（已在前序步骤实现，本步骤完善）**
+- `_HeartbeatTimer` 已在 translator / polisher / term_extractor 三个模块中实现并覆盖所有 LLM 调用
+- 每 60 秒打印等待提示，包含阶段名和已等待时长（"[等待] XX仍在进行，已等待 Xm Ys..."）
+- 调用完成时打印耗时（"[完成] XX完成（耗时 Xs）"）
+- term_extractor 本次补充心跳（之前的 `_call_llm_for_terms` 无心跳），现已完整覆盖
+
+### 关键变更
+- `src/llm_logger.py`：新建，LLM 调用日志模块（JSONL 格式）
+- `src/translator.py`：集成 log_call，超时错误清晰提示，注入 _agent_name 到 agent_cfg
+- `src/polisher.py`：集成 log_call，超时错误清晰提示，注入 _agent_name 到 agent_cfg
+- `src/term_extractor.py`：集成 log_call，超时错误清晰提示，补充心跳计时器，读取 timeout 配置
+- `main.py`：引入 json/signal 模块，新增统一检查点四阶段管理，Ctrl+C 捕获与保存，旧 progress_path 移除
+- `.gitignore`：新增 `.translation_checkpoint.json` 和 `llm_calls.jsonl`
+
+### 验证方法
+- 语法检查：全部五个文件 ast.parse() 通过
+- 功能测试：log_call 写入/读取、_blocks_to_translations/_restore_from_translations、_save_checkpoint/_load_checkpoint 全部通过
+- 导入测试：from src.llm_logger import ... 、import main 均无报错
+
+### 下一步计划
+- 步骤 12 全部子项完成
+
+---

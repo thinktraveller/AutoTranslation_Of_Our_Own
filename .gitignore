@@ -24,8 +24,10 @@ desktop.ini
 # 验证脚本（临时，验证后删除）
 _verify/
 
-# 构建临时文件
+# 构建临时文件与运行时产物
 _ato3_progress.json
+.translation_checkpoint.json
+llm_calls.jsonl
 
 # IDE
 .idea/

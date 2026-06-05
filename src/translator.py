@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -50,6 +51,49 @@ try:
 except ImportError:
     get_client = None  # type: ignore[assignment]
     _get_agent_config = None  # type: ignore[assignment]
+
+try:
+    from .llm_logger import log_call as _log_call
+except ImportError:
+    _log_call = None  # type: ignore[assignment]
+
+# ---------------------------------------------------------------------------
+# 耗时格式化与心跳计时器
+# ---------------------------------------------------------------------------
+
+def _fmt_elapsed(seconds: float) -> str:
+    """将秒数格式化为可读耗时字符串。不足 60 秒显示 'Xs'，否则显示 'XmYs'。"""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    return f"{s // 60}m{s % 60:02d}s"
+
+
+class _HeartbeatTimer:
+    """在后台每隔 interval 秒打印一次「仍在进行」提示，直到调用 stop()。"""
+
+    def __init__(self, label: str, interval: int = 60):
+        self._label = label
+        self._interval = interval
+        self._stop_event = threading.Event()
+        self._start_time = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._start_time = time.monotonic()
+        self._thread.start()
+
+    def stop(self) -> float:
+        """停止心跳，返回从 start() 到 stop() 的总秒数。"""
+        self._stop_event.set()
+        self._thread.join()
+        return time.monotonic() - self._start_time
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(timeout=self._interval):
+            elapsed = time.monotonic() - self._start_time
+            print(f"[等待] {self._label}仍在进行，已等待 {_fmt_elapsed(elapsed)}...", flush=True)
+
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -126,30 +170,106 @@ def _build_system_prompt(term_map: dict[str, str], source_lang: str = "en") -> s
 # 内部辅助：单次 LLM 调用
 # ---------------------------------------------------------------------------
 
-def _call_llm(text: str, system_prompt: str, client, agent_cfg: dict) -> str | None:
+def _call_llm(
+    text: str,
+    system_prompt: str,
+    client,
+    agent_cfg: dict,
+    label: str = "翻译",
+    timeout: int = 120,
+    batch_index: int = 1,
+    total_batches: int = 1,
+) -> str | None:
     """
     向 LLM 发送翻译请求，返回译文字符串。
-    带指数退避重试（最多 MAX_RETRIES 次）。
+    带指数退避重试（最多 MAX_RETRIES 次）和心跳计时器。
     所有重试均失败时返回 None。
+    每次调用结果（成功或失败）均写入 llm_calls.jsonl 日志。
     """
+    model_name = agent_cfg.get("model", "unknown")
+    agent_name = agent_cfg.get("_agent_name", "translator")
+    input_chars = len(text)
+
     for attempt in range(1, MAX_RETRIES + 1):
+        hb = _HeartbeatTimer(label=label)
+        hb.start()
+        t0 = time.monotonic()
         try:
             response = client.chat.completions.create(
-                model=agent_cfg["model"],
+                model=model_name,
                 temperature=agent_cfg["temperature"],
+                timeout=timeout,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text},
                 ],
             )
-            return response.choices[0].message.content.strip()
+            elapsed = hb.stop()
+            result_text = response.choices[0].message.content.strip()
+            print(f"[完成] {label}完成（耗时 {_fmt_elapsed(elapsed)}）", flush=True)
+            # 写入成功日志
+            if _log_call is not None:
+                log_line = _log_call(
+                    phase="translate",
+                    agent=agent_name,
+                    model=model_name,
+                    batch_index=batch_index,
+                    total_batches=total_batches,
+                    input_chars=input_chars,
+                    output_chars=len(result_text),
+                    elapsed_s=elapsed,
+                    success=True,
+                    error=None,
+                )
+                print(f"  [日志] llm_calls.jsonl 第 {log_line} 行", flush=True)
+            return result_text
         except Exception as e:
+            elapsed = hb.stop()
+            err_str = str(e)
+            # 超时检测：openai SDK 抛出 APITimeoutError 或消息包含 timeout
+            is_timeout = (
+                "timeout" in err_str.lower()
+                or "timed out" in err_str.lower()
+                or type(e).__name__ in ("APITimeoutError", "Timeout", "ConnectTimeout", "ReadTimeout")
+            )
+            # 写入失败日志
+            if _log_call is not None:
+                log_line = _log_call(
+                    phase="translate",
+                    agent=agent_name,
+                    model=model_name,
+                    batch_index=batch_index,
+                    total_batches=total_batches,
+                    input_chars=input_chars,
+                    output_chars=0,
+                    elapsed_s=elapsed,
+                    success=False,
+                    error=err_str[:500],
+                )
+            else:
+                log_line = None
+
             if attempt < MAX_RETRIES:
                 wait = 2 ** attempt  # 2, 4 秒
-                print(f"  [翻译] 第 {attempt} 次请求失败：{e}，{wait} 秒后重试...")
+                if is_timeout:
+                    print(
+                        f"  [翻译] 第 {attempt} 次请求超时（超过 {timeout}s）"
+                        f"，{wait} 秒后重试..."
+                    )
+                else:
+                    print(f"  [翻译] 第 {attempt} 次请求失败：{e}，{wait} 秒后重试...")
                 time.sleep(wait)
             else:
-                print(f"  [翻译] 请求失败（已重试 {MAX_RETRIES} 次）：{e}")
+                if is_timeout:
+                    print(
+                        f"  [翻译] 请求超时（已重试 {MAX_RETRIES} 次，每次超过 {timeout}s）。\n"
+                        f"  提示：可在 config.json agents.translator.timeout 中调大超时秒数，\n"
+                        f"        或检查网络连通性后重新运行（进度已自动保存，将从断点继续）。"
+                    )
+                else:
+                    print(f"  [翻译] 请求失败（已重试 {MAX_RETRIES} 次）：{e}")
+                if log_line is not None:
+                    print(f"  [日志] 详情见 llm_calls.jsonl 第 {log_line} 行")
                 return None
     return None
 
@@ -165,6 +285,7 @@ def _translate_batch(
     agent_cfg: dict,
     batch_index: int,
     total_batches: int,
+    timeout: int = 120,
 ) -> None:
     """
     翻译一批 TranslatableBlock，就地填充 translation 字段。
@@ -175,27 +296,35 @@ def _translate_batch(
 
     # 单段直接翻译，不使用分隔符（减少 LLM 误解风险）
     if len(batch) == 1:
-        print(f"  批次 {batch_index}/{total_batches}（1 段）...", end=" ", flush=True)
-        result = _call_llm(batch[0].text, system_prompt, client, agent_cfg)
-        if result is not None:
-            batch[0].translation = result
-            print("完成")
+        label = f"第 {batch_index} 段翻译"
+        print(f"  批次 {batch_index}/{total_batches}（1 段）...")
+        result = _call_llm(
+            batch[0].text, system_prompt, client, agent_cfg,
+            label=label, timeout=timeout,
+            batch_index=batch_index, total_batches=total_batches,
+        )
+        if result is None:
+            print("  失败，保留空译文")
         else:
-            print("失败，保留空译文")
+            batch[0].translation = result
         return
 
     # 多段合并翻译
     combined = f"\n\n{PARAGRAPH_SEP}\n\n".join(b.text for b in batch)
+    label = f"第 {batch_index} 批翻译"
     print(
-        f"  批次 {batch_index}/{total_batches}（{len(batch)} 段，{len(combined)} 字符）...",
-        end=" ",
-        flush=True,
+        f"  批次 {batch_index}/{total_batches}（{len(batch)} 段，{len(combined)} 字符）..."
     )
-    raw_result = _call_llm(combined, system_prompt, client, agent_cfg)
+    raw_result = _call_llm(
+        combined, system_prompt, client, agent_cfg,
+        label=label, timeout=timeout,
+        batch_index=batch_index, total_batches=total_batches,
+    )
 
     if raw_result is None:
-        print("失败，批次降级为逐段翻译...")
-        _fallback_translate_one_by_one(batch, system_prompt, client, agent_cfg)
+        print("  失败，批次降级为逐段翻译...")
+        _fallback_translate_one_by_one(batch, system_prompt, client, agent_cfg, timeout=timeout,
+                                       batch_offset=batch_index, total_batches=total_batches)
         return
 
     # 按分隔符拆分译文
@@ -203,14 +332,14 @@ def _translate_batch(
 
     if len(parts) != len(batch):
         print(
-            f"段落数不匹配（期望 {len(batch)}，实际 {len(parts)}），降级为逐段翻译..."
+            f"  段落数不匹配（期望 {len(batch)}，实际 {len(parts)}），降级为逐段翻译..."
         )
-        _fallback_translate_one_by_one(batch, system_prompt, client, agent_cfg)
+        _fallback_translate_one_by_one(batch, system_prompt, client, agent_cfg, timeout=timeout,
+                                       batch_offset=batch_index, total_batches=total_batches)
         return
 
     for block, translated_text in zip(batch, parts):
         block.translation = translated_text
-    print("完成")
 
 
 def _fallback_translate_one_by_one(
@@ -218,19 +347,26 @@ def _fallback_translate_one_by_one(
     system_prompt: str,
     client,
     agent_cfg: dict,
+    timeout: int = 120,
+    batch_offset: int = 1,
+    total_batches: int = 1,
 ) -> None:
     """降级方案：对批次中每段逐一单独翻译。"""
     for i, block in enumerate(batch, 1):
         if block.translation:
             # 已有译文（断点续传），跳过
             continue
-        print(f"    降级翻译第 {i}/{len(batch)} 段...", end=" ", flush=True)
-        result = _call_llm(block.text, system_prompt, client, agent_cfg)
+        label = f"降级翻译第 {i}/{len(batch)} 段"
+        print(f"    {label}...")
+        result = _call_llm(
+            block.text, system_prompt, client, agent_cfg,
+            label=label, timeout=timeout,
+            batch_index=batch_offset, total_batches=total_batches,
+        )
         if result is not None:
             block.translation = result
-            print("完成")
         else:
-            print("失败，保留空译文")
+            print("    失败，保留空译文")
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +463,9 @@ def translate_blocks(
             "llm_config 模块未找到，请确认项目根目录下存在 llm_config.py。"
         )
     client, agent_cfg = get_client(agent)
+    # 注入 agent 名称，供 _call_llm 写日志时使用
+    agent_cfg = dict(agent_cfg)
+    agent_cfg["_agent_name"] = agent
 
     # 构建系统提示词（优先使用 config.json 中的自定义提示词）
     custom_prompt: str | None = None
@@ -366,12 +505,15 @@ def translate_blocks(
         print("[翻译] 所有段落均已翻译，跳过。")
         return
 
+    # 从 agent 配置读取超时时间（秒），默认 120
+    llm_timeout = int(agent_cfg.get("timeout", 120))
+
     # 分批翻译
     total_batches = (len(pending) + BATCH_SIZE - 1) // BATCH_SIZE
     for i in range(0, len(pending), BATCH_SIZE):
         batch = pending[i : i + BATCH_SIZE]
         batch_index = i // BATCH_SIZE + 1
-        _translate_batch(batch, system_prompt, client, agent_cfg, batch_index, total_batches)
+        _translate_batch(batch, system_prompt, client, agent_cfg, batch_index, total_batches, timeout=llm_timeout)
 
         # 每批完成后保存进度
         if progress_path is not None:

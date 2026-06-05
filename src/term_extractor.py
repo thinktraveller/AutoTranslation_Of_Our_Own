@@ -29,6 +29,8 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -42,6 +44,49 @@ try:
 except ImportError:
     get_client = None  # type: ignore[assignment]
     _get_agent_config = None  # type: ignore[assignment]
+
+try:
+    from .llm_logger import log_call as _log_call
+except ImportError:
+    _log_call = None  # type: ignore[assignment]
+
+# ---------------------------------------------------------------------------
+# 耗时格式化与心跳计时器（与 translator.py 保持一致）
+# ---------------------------------------------------------------------------
+
+def _fmt_elapsed(seconds: float) -> str:
+    """将秒数格式化为可读耗时字符串。不足 60 秒显示 'Xs'，否则显示 'XmYs'。"""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    return f"{s // 60}m{s % 60:02d}s"
+
+
+class _HeartbeatTimer:
+    """在后台每隔 interval 秒打印一次「仍在进行」提示，直到调用 stop()。"""
+
+    def __init__(self, label: str, interval: int = 60):
+        self._label = label
+        self._interval = interval
+        self._stop_event = threading.Event()
+        self._start_time = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._start_time = time.monotonic()
+        self._thread.start()
+
+    def stop(self) -> float:
+        """停止心跳，返回从 start() 到 stop() 的总秒数。"""
+        self._stop_event.set()
+        self._thread.join()
+        return time.monotonic() - self._start_time
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(timeout=self._interval):
+            elapsed = time.monotonic() - self._start_time
+            print(f"[等待] {self._label}仍在进行，已等待 {_fmt_elapsed(elapsed)}...", flush=True)
+
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -106,39 +151,104 @@ class ExtractedTerm:
 # 内部辅助：LLM 调用
 # ---------------------------------------------------------------------------
 
-def _call_llm_for_terms(text: str, client, agent_cfg: dict, system_prompt: str | None = None) -> list[ExtractedTerm]:
+def _call_llm_for_terms(
+    text: str,
+    client,
+    agent_cfg: dict,
+    system_prompt: str | None = None,
+    batch_index: int = 1,
+    total_batches: int = 1,
+    timeout: int = 120,
+) -> list[ExtractedTerm]:
     """
     向 LLM 发送单批文本，解析并返回术语列表。
     若 LLM 响应格式不合法，打印警告并返回空列表（不抛异常）。
-    内置指数退避重试（最多 MAX_RETRIES 次）。
+    内置指数退避重试（最多 MAX_RETRIES 次）和心跳计时器。
+    每次调用结果均写入 llm_calls.jsonl 日志。
     system_prompt 为 None 时使用默认英文提示词。
     """
-    import time
-
     if system_prompt is None:
         system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(source_lang=_get_lang_name("en"))
 
+    model_name = agent_cfg.get("model", "unknown")
+    agent_name = agent_cfg.get("_agent_name", "term_extractor")
+    input_chars = len(text)
+    raw = ""
     last_exception = None
+
     for attempt in range(1, MAX_RETRIES + 1):
+        hb = _HeartbeatTimer(label=f"术语提取第 {batch_index} 批")
+        hb.start()
         try:
             response = client.chat.completions.create(
-                model=agent_cfg["model"],
+                model=model_name,
                 temperature=agent_cfg["temperature"],
+                timeout=timeout,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text},
                 ],
             )
+            elapsed = hb.stop()
             raw = response.choices[0].message.content.strip()
+            # 写入成功日志
+            if _log_call is not None:
+                log_line = _log_call(
+                    phase="term_extract",
+                    agent=agent_name,
+                    model=model_name,
+                    batch_index=batch_index,
+                    total_batches=total_batches,
+                    input_chars=input_chars,
+                    output_chars=len(raw),
+                    elapsed_s=elapsed,
+                    success=True,
+                    error=None,
+                )
+                print(f"  [日志] llm_calls.jsonl 第 {log_line} 行", flush=True)
             break  # 成功，跳出重试循环
         except Exception as e:
+            elapsed = hb.stop()
             last_exception = e
+            err_str = str(e)
+            is_timeout = (
+                "timeout" in err_str.lower()
+                or "timed out" in err_str.lower()
+                or type(e).__name__ in ("APITimeoutError", "Timeout", "ConnectTimeout", "ReadTimeout")
+            )
+            # 写入失败日志
+            if _log_call is not None:
+                log_line = _log_call(
+                    phase="term_extract",
+                    agent=agent_name,
+                    model=model_name,
+                    batch_index=batch_index,
+                    total_batches=total_batches,
+                    input_chars=input_chars,
+                    output_chars=0,
+                    elapsed_s=elapsed,
+                    success=False,
+                    error=err_str[:500],
+                )
+            else:
+                log_line = None
             if attempt < MAX_RETRIES:
                 wait = 2 ** attempt  # 2, 4 秒
-                print(f"  [术语提取] 第 {attempt} 次请求失败：{e}，{wait} 秒后重试...")
+                if is_timeout:
+                    print(f"  [术语提取] 第 {attempt} 次请求超时（超过 {timeout}s），{wait} 秒后重试...")
+                else:
+                    print(f"  [术语提取] 第 {attempt} 次请求失败：{e}，{wait} 秒后重试...")
                 time.sleep(wait)
             else:
-                print(f"  [术语提取] 请求失败（已重试 {MAX_RETRIES} 次）：{e}")
+                if is_timeout:
+                    print(
+                        f"  [术语提取] 请求超时（已重试 {MAX_RETRIES} 次，每次超过 {timeout}s）。\n"
+                        f"  提示：可在 config.json agents.term_extractor.timeout 中调大超时秒数。"
+                    )
+                else:
+                    print(f"  [术语提取] 请求失败（已重试 {MAX_RETRIES} 次）：{e}")
+                if log_line is not None:
+                    print(f"  [日志] 详情见 llm_calls.jsonl 第 {log_line} 行")
                 return []
     else:
         # 所有重试均失败（理论上不会走到这里，但保险起见）
@@ -246,14 +356,19 @@ def extract_terms(
     except (ImportError, EnvironmentError, KeyError) as e:
         print(f"[术语提取] 无法初始化 LLM 客户端：{e}")
         raise
+    # 注入 agent 名称，供 _call_llm_for_terms 写日志时使用
+    agent_cfg = dict(agent_cfg)
+    agent_cfg["_agent_name"] = agent
 
     # 构建本次请求使用的系统提示词（优先使用 config.json 中的自定义提示词）
     lang_name = _get_lang_name(source_lang)
     custom_prompt: str | None = None
+    llm_timeout: int = 120
     try:
         if _get_agent_config is not None:
             _cfg = _get_agent_config(agent)
             custom_prompt = _cfg.get("system_prompt") or None
+            llm_timeout = int(_cfg.get("timeout", 120))
     except Exception:
         pass
     system_prompt = custom_prompt if custom_prompt else _SYSTEM_PROMPT_TEMPLATE.format(source_lang=lang_name)
@@ -268,7 +383,13 @@ def extract_terms(
     all_terms: list[ExtractedTerm] = []
     for i, batch_text in enumerate(batches, 1):
         print(f"  处理第 {i}/{total_batches} 批（{len(batch_text)} 字符）...", end=" ", flush=True)
-        terms = _call_llm_for_terms(batch_text, client, agent_cfg, system_prompt=system_prompt)
+        terms = _call_llm_for_terms(
+            batch_text, client, agent_cfg,
+            system_prompt=system_prompt,
+            batch_index=i,
+            total_batches=total_batches,
+            timeout=llm_timeout,
+        )
         print(f"提取到 {len(terms)} 条术语")
         all_terms.extend(terms)
 

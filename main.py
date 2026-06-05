@@ -19,8 +19,10 @@ main.py — ATO3 主流程入口
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
+import signal
 import sys
 from pathlib import Path
 
@@ -75,6 +77,77 @@ def _save_ip_dict(ip_dict_path: Path, ip_data: dict, new_terms: dict) -> None:
         print(f'  [词典] 已保存 {len(new_terms)} 条新术语到：{ip_dict_path}')
     except Exception as e:
         print(f'  [警告] IP 词典保存失败：{e}')
+
+
+# ── 统一断点续传检查点 ─────────────────────────────────────────────────────
+
+# 检查点文件名（固定，不随输入文件名变化）
+_CHECKPOINT_FILENAME = ".translation_checkpoint.json"
+
+# 阶段标识（按执行顺序）
+_PHASE_NON_BODY = "non_body"      # 标签/摘要/前言/尾注翻译
+_PHASE_BODY = "body"              # 正文翻译
+_PHASE_POLISH = "polish"          # 润色（完成标记，无段落数据）
+
+
+def _checkpoint_path(html_path: Path) -> Path:
+    """返回检查点文件的绝对路径（与输入文件同目录）。"""
+    return html_path.parent / _CHECKPOINT_FILENAME
+
+
+def _load_checkpoint(ckpt_path: Path) -> dict:
+    """
+    加载检查点文件，返回 dict。
+    结构：
+      {
+        "source_file": str,          # 输入 HTML 文件名（用于校验）
+        "phases": {
+          "non_body": {"done": bool, "translations": {block_id: text}},
+          "body":     {"done": bool, "translations": {block_id: text}},
+          "polish":   {"done": bool},
+        }
+      }
+    若文件不存在或解析失败，返回空结构。
+    """
+    if not ckpt_path.exists():
+        return {}
+    try:
+        data = json.loads(ckpt_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_checkpoint(ckpt_path: Path, source_file: str, phases: dict) -> None:
+    """
+    原子写入检查点文件。
+    phases 结构同 _load_checkpoint 返回值的 "phases" 字段。
+    """
+    data = {"source_file": source_file, "phases": phases}
+    tmp = ckpt_path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(ckpt_path)
+    except Exception as e:
+        print(f"  [断点续传] 检查点写入失败：{e}")
+
+
+def _blocks_to_translations(blocks: list) -> dict:
+    """将已有译文的 block 列表转为 {block_id: translation} 字典。"""
+    return {b.block_id: b.translation for b in blocks if b.translation}
+
+
+def _restore_from_translations(translations: dict, blocks: list) -> int:
+    """将 {block_id: translation} 回填到 blocks，返回恢复数量。"""
+    id_map = {b.block_id: b for b in blocks}
+    count = 0
+    for bid, tr in translations.items():
+        if bid in id_map and tr:
+            id_map[bid].translation = tr
+            count += 1
+    return count
 
 
 # ── 参数解析 ──────────────────────────────────────────────────────────────
@@ -250,8 +323,61 @@ def main(argv=None) -> int:
         print(f'[警告] 文件扩展名不是 .html/.htm，仍尝试解析：{html_path}')
     print(f'  输入文件：{html_path.resolve()}')
 
-    # 断点续传文件路径（与输入文件同目录，纯 ASCII 文件名）
-    progress_path = html_path.parent / f'{_safe_stem(html_path)}_progress.json'
+    # ── 统一断点续传检查点（四阶段共用）───────────────────────────────────
+    ckpt_path = _checkpoint_path(html_path)
+    ckpt = _load_checkpoint(ckpt_path)
+    source_key = html_path.name  # 用于校验检查点是否匹配当前文件
+
+    # 若检查点属于另一个文件，丢弃
+    if ckpt and ckpt.get("source_file") != source_key:
+        print(f'  [断点续传] 检查点属于不同文件（{ckpt.get("source_file")}），已忽略。')
+        ckpt = {}
+
+    phases: dict = ckpt.get("phases", {})
+    if phases:
+        print(f'  [断点续传] 检测到已有检查点：{ckpt_path}')
+
+    # ── Ctrl+C 捕获（保存当前进度后优雅退出）──────────────────────────────
+    # _work / _term_map 在主流程中赋值后由信号处理器访问
+    _sigint_ctx: dict = {"work": None, "ckpt_path": ckpt_path, "source_key": source_key, "phases": phases}
+
+    def _sigint_handler(signum, frame):  # noqa: ANN001
+        print()
+        print('\n[中断] 检测到 Ctrl+C，正在保存进度...')
+        w = _sigint_ctx.get("work")
+        ph = _sigint_ctx.get("phases", {})
+        if w is not None:
+            # 保存当前已翻译的段落
+            nb = w.tags + w.summary + w.notes + w.endnotes
+            b = w.body
+            if _PHASE_NON_BODY not in ph:
+                ph[_PHASE_NON_BODY] = {}
+            ph[_PHASE_NON_BODY]["translations"] = _blocks_to_translations(nb)
+            ph[_PHASE_NON_BODY]["done"] = all(
+                bl.translation for bl in nb if bl.text.strip()
+            )
+            if _PHASE_BODY not in ph:
+                ph[_PHASE_BODY] = {}
+            ph[_PHASE_BODY]["translations"] = _blocks_to_translations(b)
+            ph[_PHASE_BODY]["done"] = all(
+                bl.translation for bl in b if bl.text.strip()
+            )
+            _save_checkpoint(_sigint_ctx["ckpt_path"], _sigint_ctx["source_key"], ph)
+            print(f'  进度已保存至：{_sigint_ctx["ckpt_path"]}')
+        print()
+        print('  续翻说明：直接重新运行相同命令，将自动从断点继续：')
+        print(f'    python main.py {args.html_file}' + (
+            f' --skip-term-extract' if args.skip_term_extract else ''
+        ) + (
+            f' --skip-polish' if args.skip_polish else ''
+        ))
+        sys.exit(130)
+
+    # 注册信号（Windows 上 SIGINT 可用；SIGTERM 在部分 Windows 版本受限）
+    try:
+        signal.signal(signal.SIGINT, _sigint_handler)
+    except (OSError, ValueError):
+        pass  # 非主线程或不支持时静默忽略
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # 2. 解析 HTML
@@ -262,6 +388,9 @@ def main(argv=None) -> int:
     except Exception as e:
         print(f'[错误] HTML 解析失败：{e}')
         return 1
+
+    # 让信号处理器可以访问 work 对象
+    _sigint_ctx["work"] = work
 
     total_body = len(work.body)
     total_tags = len(work.tags)
@@ -317,6 +446,8 @@ def main(argv=None) -> int:
         all_blocks = work.body + work.tags + work.summary + work.notes + work.endnotes
         try:
             new_terms, session_terms = extract_and_confirm(all_blocks, existing_terms=term_map, source_lang=args.source_lang)
+        except KeyboardInterrupt:
+            raise  # 交给上层信号处理器
         except Exception as e:
             print(f'  [警告] 术语提取失败：{e}')
             print('  继续使用现有词典翻译。')
@@ -342,35 +473,68 @@ def main(argv=None) -> int:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     step('翻译所有段落')
 
-    # 断点续传：恢复已翻译内容
-    all_blocks_for_progress = (
-        work.tags + work.summary + work.notes + work.body + work.endnotes
-    )
-    if progress_path.exists():
-        restored = load_progress(progress_path, all_blocks_for_progress)
-        if restored > 0:
-            print(f'  [断点续传] 已恢复 {restored} 段已完成译文')
-
-    # 非正文区（标签、摘要、前言、尾注）——不使用进度文件，通常很短
     non_body_blocks = work.tags + work.summary + work.notes + work.endnotes
-    pending_non_body = [b for b in non_body_blocks if not b.translation and b.text.strip()]
-    if pending_non_body:
-        print(f'  翻译非正文区（{len(pending_non_body)} 段）...')
-        try:
-            translate_work(pending_non_body, term_map=term_map, source_lang=args.source_lang)
-        except Exception as e:
-            print(f'  [警告] 非正文区翻译失败：{e}，将使用原文代替。')
 
-    # 正文——使用进度文件支持断点续传
-    if work.body:
+    # ── 从检查点恢复非正文区 ───────────────────────────────────────────────
+    non_body_phase = phases.get(_PHASE_NON_BODY, {})
+    if non_body_phase.get("translations"):
+        restored_nb = _restore_from_translations(non_body_phase["translations"], non_body_blocks)
+        if restored_nb > 0:
+            print(f'  [断点续传] 非正文区已恢复 {restored_nb} 段译文')
+
+    # ── 从检查点恢复正文 ───────────────────────────────────────────────────
+    body_phase = phases.get(_PHASE_BODY, {})
+    if body_phase.get("translations"):
+        restored_body = _restore_from_translations(body_phase["translations"], work.body)
+        if restored_body > 0:
+            print(f'  [断点续传] 正文已恢复 {restored_body} 段译文')
+
+    # ── 翻译非正文区（标签、摘要、前言、尾注）────────────────────────────
+    if non_body_phase.get("done"):
+        print('  [跳过] 非正文区已完成（来自检查点）')
+    else:
+        pending_non_body = [b for b in non_body_blocks if not b.translation and b.text.strip()]
+        if pending_non_body:
+            print(f'  翻译非正文区（{len(pending_non_body)} 段）...')
+            try:
+                translate_work(pending_non_body, term_map=term_map, source_lang=args.source_lang)
+            except KeyboardInterrupt:
+                raise  # 交给信号处理器
+            except Exception as e:
+                print(f'  [警告] 非正文区翻译失败：{e}，将使用原文代替。')
+        # 保存非正文区进度到检查点
+        phases[_PHASE_NON_BODY] = {
+            "done": all(b.translation for b in non_body_blocks if b.text.strip()),
+            "translations": _blocks_to_translations(non_body_blocks),
+        }
+        _save_checkpoint(ckpt_path, source_key, phases)
+
+    # ── 翻译正文（支持断点续传）───────────────────────────────────────────
+    if body_phase.get("done"):
+        print('  [跳过] 正文翻译已完成（来自检查点）')
+    elif work.body:
         print(f'  翻译正文（{len(work.body)} 段）...')
         try:
-            translate_work(work.body, term_map=term_map, progress_path=progress_path, source_lang=args.source_lang)
+            translate_work(work.body, term_map=term_map, source_lang=args.source_lang)
+        except KeyboardInterrupt:
+            raise  # 交给信号处理器
         except Exception as e:
+            # 保存当前进度到检查点，再退出
+            phases[_PHASE_BODY] = {
+                "done": False,
+                "translations": _blocks_to_translations(work.body),
+            }
+            _save_checkpoint(ckpt_path, source_key, phases)
             print(f'  [错误] 正文翻译失败：{e}')
-            print(f'  已翻译内容已保存至：{progress_path}')
+            print(f'  已翻译内容已保存至：{ckpt_path}')
             print('  修复问题后重新运行，将自动从断点继续。')
             return 1
+        # 翻译完成，更新检查点
+        phases[_PHASE_BODY] = {
+            "done": True,
+            "translations": _blocks_to_translations(work.body),
+        }
+        _save_checkpoint(ckpt_path, source_key, phases)
 
     # 词典漏译校验
     warnings = verify_terms(work.body, term_map)
@@ -385,11 +549,20 @@ def main(argv=None) -> int:
     # 6. 润色（可选，仅正文）
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     if not args.skip_polish:
-        step('润色正文')
-        try:
-            polish_work(work.body, skip_polish=False, source_lang=args.source_lang, chapters=work.chapters)
-        except Exception as e:
-            print(f'  [警告] 润色失败：{e}，跳过润色使用翻译原文继续。')
+        polish_phase = phases.get(_PHASE_POLISH, {})
+        if polish_phase.get("done"):
+            print('\n[跳过] 润色已完成（来自检查点）')
+        else:
+            step('润色正文')
+            try:
+                polish_work(work.body, skip_polish=False, source_lang=args.source_lang, chapters=work.chapters)
+            except KeyboardInterrupt:
+                raise  # 交给信号处理器
+            except Exception as e:
+                print(f'  [警告] 润色失败：{e}，跳过润色使用翻译原文继续。')
+            # 标记润色已完成
+            phases[_PHASE_POLISH] = {"done": True}
+            _save_checkpoint(ckpt_path, source_key, phases)
     else:
         print('\n[跳过] 润色（--skip-polish）')
 
@@ -404,11 +577,11 @@ def main(argv=None) -> int:
         print(f'[错误] 输出失败：{e}')
         return 1
 
-    # 清理断点续传文件
-    if progress_path.exists():
+    # ── 清理检查点文件（翻译全部完成）────────────────────────────────────
+    if ckpt_path.exists():
         try:
-            progress_path.unlink()
-            print(f'  [清理] 已删除断点续传文件：{progress_path}')
+            ckpt_path.unlink()
+            print(f'  [清理] 已删除断点续传检查点：{ckpt_path}')
         except Exception:
             pass
 
