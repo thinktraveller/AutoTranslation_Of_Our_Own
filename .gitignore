@@ -2,6 +2,7 @@
 .env
 *.env
 .env.*
+!.env.example
 
 # Python 虚拟环境
 .venv/
@@ -32,6 +33,15 @@ llm_calls.jsonl
 # 任务日志（运行时生成，不纳入版本控制；仅保留目录本身）
 logs/*
 !logs/.gitkeep
+
+# 本地配置（含 API 密钥，不上传）
+config.json
+
+# 本地文档（不上传）
+docs/
+
+# Claude Code 本地数据
+.claude/
 
 # IDE
 .idea/
