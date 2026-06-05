@@ -544,3 +544,31 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 - 步骤 15 全部完成，构建全部结束
 
 ---
+
+## [2026-06-05 16:03] 修复：交互式启动方案菜单硬编码导致已删除方案仍显示
+
+### 问题描述
+- 现象：运行 `python main.py`（无参数，进入交互式模式）时，方案选择菜单始终显示 fast / balanced / quality 三个硬编码选项，即使用户已通过配置编辑器将这三个内置方案删除（写入 `deleted_profiles`）。实际 config.json 中只有 `r18` 和 `general` 两个自定义方案可用，但菜单无法选到它们（两个自定义方案仅作为"额外"选项被追加到固定的三个内置选项之后）。
+- 影响范围：交互式启动时所有用户均受影响；选择已删除的内置方案会导致运行时使用硬编码兜底方案而非用户预期的实际可用方案。
+
+### 根本原因
+`_interactive_input()` 中的方案选择逻辑（原第 403-436 行）：
+1. 固定打印三条 `print()` 语句展示 fast / balanced / quality，不受 `deleted_profiles` 约束
+2. `_custom_profiles` 的过滤条件是 `k not in {"fast", "balanced", "quality"}`，仅把不在内置名集合中的方案追加显示，但未先过滤已删除方案
+3. 整体选项编号从 1 固定占用 fast/balanced/quality 三个名额，自定义方案从 4 开始，导致编号与实际可用列表不对应
+
+### 修复方案
+重写方案枚举逻辑，改为完全动态生成：
+1. 从 `load_config()` 读取 `deleted_profiles` 集合
+2. 遍历内置名列表 `["fast","balanced","quality"]`，跳过在 `deleted_profiles` 中的条目
+3. 遍历 `config.json` 的 `profiles` 字段，将不在内置名列表中的自定义方案追加
+4. 最终 `_available_profiles` 列表即为实际可选列表，从 1 开始连续编号展示
+5. 增加 `config.json` 不可读时的兜底逻辑（退回显示全部三个内置方案）
+
+### 变更文件
+- `main.py`：替换 `_interactive_input()` 内第 403-436 行的方案选择代码段
+
+### 验证方法
+运行 `python main.py`，确认方案菜单仅显示 config.json 中实际可用的方案（`r18` 和 `general`），不再出现已被删除的 fast / balanced / quality；选择编号后 `--profile` 参数与所选方案名一致。
+
+---

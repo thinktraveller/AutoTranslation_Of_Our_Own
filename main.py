@@ -400,31 +400,39 @@ def _interactive_input() -> list[str]:
 
     # 2. 模型方案选择
     print()
-    # 动态读取 config.json 中的自定义方案（若有）
-    _custom_profiles: list[str] = []
+    # 动态读取 config.json，生成实际可用方案列表（过滤 deleted_profiles）
+    _builtin_names = ["fast", "balanced", "quality"]
+    _builtin_desc = {
+        "fast":     "全程 DeepSeek（速度快、成本低）",
+        "balanced": "DeepSeek 翻译 + GPT-4o-mini 润色（推荐）",
+        "quality":  "全程 OpenAI GPT-4o（质量最优）",
+    }
+    _available_profiles: list[str] = []
     try:
         from src.llm_config import load_config as _load_cfg
         _cfg = _load_cfg()
-        _builtin_names = {"fast", "balanced", "quality"}
-        _custom_profiles = [k for k in _cfg.get("profiles", {}) if k not in _builtin_names]
+        _deleted = set(_cfg.get("deleted_profiles", []))
+        # 未被删除的内置方案
+        for _bn in _builtin_names:
+            if _bn not in _deleted:
+                _available_profiles.append(_bn)
+        # 用户自定义方案（不在内置名列表中）
+        for _k in _cfg.get("profiles", {}):
+            if _k not in _builtin_names:
+                _available_profiles.append(_k)
     except Exception:
-        pass
+        # config.json 不可读时，退回显示全部内置方案
+        _available_profiles = list(_builtin_names)
 
     print('可用模型方案：')
-    print('  [1] fast     - 全程 DeepSeek（速度快、成本低）')
-    print('  [2] balanced - DeepSeek 翻译 + GPT-4o-mini 润色（推荐）')
-    print('  [3] quality  - 全程 OpenAI GPT-4o（质量最优）')
-    _extra_start = 4
-    for _i, _pname in enumerate(_custom_profiles, _extra_start):
-        print(f'  [{_i}] {_pname}（自定义方案）')
-    _total_choices = 3 + len(_custom_profiles)
+    _profile_map: dict[str, str] = {}
+    for _i, _pname in enumerate(_available_profiles, 1):
+        _desc = _builtin_desc.get(_pname, "自定义方案")
+        print(f'  [{_i}] {_pname} - {_desc}')
+        _profile_map[str(_i)] = _pname
+    _total_choices = len(_available_profiles)
     print(f'  [{_total_choices + 1}] 使用配置文件中的 default_profile（或旧版 agents 字段）')
     print()
-    _profile_map = {
-        '1': 'fast', '2': 'balanced', '3': 'quality',
-    }
-    for _i, _pname in enumerate(_custom_profiles, _extra_start):
-        _profile_map[str(_i)] = _pname
 
     while True:
         _sel = input(f'请选择方案 [1-{_total_choices + 1}，默认 {_total_choices + 1}]：').strip()
