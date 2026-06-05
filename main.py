@@ -55,7 +55,7 @@ from src.output_writer import (
     write_txt, pause_for_proofread, write_markdown, pause_before_docx,
     write_docx, get_output_paths, _safe_stem,
 )
-from src.llm_config import get_profile_config
+from src.llm_config import get_profile_config, load_config as _llm_load_config, _load_env as _llm_load_env
 
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────
@@ -316,6 +316,140 @@ def _restore_from_translations(translations: dict, blocks: list) -> int:
     return count
 
 
+# ── 启动前方案可用性检查 ─────────────────────────────────────────────────
+
+def _check_profile_ready() -> None:
+    """
+    检查是否存在至少一个可用的模型方案。
+
+    「可用」定义：方案中 term_extractor / translator / polisher 三个 agent
+    均能解析出 base_url / model / api_key_env，且对应环境变量已设置且非空。
+
+    至少一个方案通过则静默返回；全部失败则打印友好提示并 sys.exit(1)。
+    config.json 不存在或解析失败视为无可用方案。
+    """
+    # 先加载 .env，确保环境变量已就位
+    _llm_load_env()
+
+    # 内置预设（不依赖 config.json）
+    _BUILTIN_PROFILES: dict[str, dict] = {
+        "fast": {
+            "term_extractor": {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.1},
+            "translator":     {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.3},
+            "polisher":       {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.3},
+        },
+        "balanced": {
+            "term_extractor": {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.1},
+            "translator":     {"provider": "deepseek", "model": "deepseek-chat", "temperature": 0.3},
+            "polisher":       {"provider": "openai",   "model": "gpt-4o-mini",   "temperature": 0.5},
+        },
+        "quality": {
+            "term_extractor": {"provider": "openai", "model": "gpt-4o-mini", "temperature": 0.1},
+            "translator":     {"provider": "openai", "model": "gpt-4o",      "temperature": 0.3},
+            "polisher":       {"provider": "openai", "model": "gpt-4o",      "temperature": 0.5},
+        },
+    }
+
+    # 尝试读取 config.json；不存在或解析失败视为无可用方案
+    try:
+        cfg = _llm_load_config()
+    except Exception:
+        cfg = None
+
+    if cfg is None:
+        _print_no_profile_hint([])
+        sys.exit(1)
+
+    providers: dict = cfg.get("providers", {})
+    deleted: set = set(cfg.get("deleted_profiles", []))
+    file_profiles: dict = cfg.get("profiles", {})
+
+    # 构建候选方案列表：未删除内置方案 + 自定义方案
+    candidate_profiles: list[tuple[str, dict]] = []
+    for name, pdata in _BUILTIN_PROFILES.items():
+        if name not in deleted:
+            # 文件中同名方案可覆盖内置预设
+            candidate_profiles.append((name, file_profiles.get(name, pdata)))
+    for name, pdata in file_profiles.items():
+        if name not in _BUILTIN_PROFILES:
+            candidate_profiles.append((name, pdata))
+
+    if not candidate_profiles:
+        _print_no_profile_hint([])
+        sys.exit(1)
+
+    failed_profiles: list[str] = []
+    for profile_name, profile_data in candidate_profiles:
+        ok = _validate_profile(profile_name, profile_data, providers)
+        if ok:
+            return  # 至少一个方案通过，静默继续
+
+        failed_profiles.append(profile_name)
+
+    # 全部方案均不可用
+    _print_no_profile_hint(failed_profiles)
+    sys.exit(1)
+
+
+def _validate_profile(profile_name: str, profile_data: dict, providers: dict) -> bool:
+    """
+    验证单个方案是否可用：三个 agent 均能解析出 base_url/model/api_key_env，
+    且 api_key_env 对应的环境变量已设置且非空。
+    返回 True 表示可用。
+    """
+    for agent_key in ("term_extractor", "translator", "polisher"):
+        agent_cfg = profile_data.get(agent_key)
+        if not isinstance(agent_cfg, dict):
+            return False
+
+        provider_name = agent_cfg.get("provider")
+        model = agent_cfg.get("model")
+
+        if not provider_name or not model:
+            return False
+
+        provider_data = providers.get(provider_name)
+        if not isinstance(provider_data, dict):
+            return False
+
+        base_url = provider_data.get("base_url")
+        api_key_env = provider_data.get("api_key_env")
+
+        if not base_url or not api_key_env:
+            return False
+
+        if not os.environ.get(api_key_env):
+            return False
+
+    return True
+
+
+def _print_no_profile_hint(failed_profiles: list[str]) -> None:
+    """打印无可用方案时的友好提示，说明如何配置。"""
+    print()
+    print("=" * 60)
+    print("  [错误] 未找到任何可用的模型方案。")
+    print()
+    print("  可能原因：")
+    print("    1. config.json 不存在或无法解析")
+    print("    2. 方案引用的提供商未在 config.json 中配置")
+    print("    3. 提供商所需的 API Key 环境变量未设置")
+    print()
+    print("  解决方法：")
+    print("    1. 确认项目根目录存在 config.json")
+    print("    2. 运行以下命令进入配置编辑器，添加提供商和方案：")
+    print("         python -m src.llm_config")
+    print("    3. 在项目根目录的 .env 文件中设置 API Key，例如：")
+    print("         DEEPSEEK_API_KEY=your-deepseek-key")
+    print("         OPENAI_API_KEY=your-openai-key")
+    print("    4. 参考 .env.example 文件的格式")
+    if failed_profiles:
+        print()
+        print(f"  以下方案验证失败：{', '.join(failed_profiles)}")
+    print("=" * 60)
+    print()
+
+
 # ── 参数解析 ──────────────────────────────────────────────────────────────
 
 def _parse_args(argv=None) -> argparse.Namespace:
@@ -519,6 +653,9 @@ def _interactive_input() -> list[str]:
 # ── 主流程 ────────────────────────────────────────────────────────────────
 
 def main(argv=None) -> int:
+    # ── 启动前检查：确保至少一个模型方案可用 ──────────────────────────────
+    _check_profile_ready()
+
     # ── 启动时扫描未完成任务（仅在无参数/交互模式时扫描）──────────────────
     _resume_state: dict | None = None
     _resume_log_dir: Path | None = None

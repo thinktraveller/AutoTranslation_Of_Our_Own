@@ -572,3 +572,33 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 运行 `python main.py`，确认方案菜单仅显示 config.json 中实际可用的方案（`r18` 和 `general`），不再出现已被删除的 fast / balanced / quality；选择编号后 `--profile` 参数与所选方案名一致。
 
 ---
+
+## [2026-06-05 16:12] 新增：启动时检测可用模型方案完整性
+
+### 问题描述
+- 现象：若用户未配置 API Key 或 config.json 缺少提供商信息，程序会在翻译步骤才报错（EnvironmentError），此前的术语提取、HTML 解析等步骤均已完成，浪费用户时间。
+- 影响范围：所有用户，尤其是初次配置时未正确设置 API Key 的情况。
+
+### 根本原因
+启动流程缺少前置配置完整性校验，所有校验均推迟到实际调用 LLM API 时才触发。
+
+### 修复方案
+在 `main()` 入口处（交互式/CLI 分支之前）新增 `_check_profile_ready()` 调用：
+- 先调用 `_llm_load_env()` 加载 .env 文件
+- 遍历所有可用方案（过滤 `deleted_profiles`，含未删除内置方案 + 自定义方案）
+- 对每个方案验证 `term_extractor` / `translator` / `polisher` 三个 agent 均能解析出 `base_url` / `model` / `api_key_env`，且 `api_key_env` 对应环境变量已设置且非空
+- 至少一个方案通过则静默继续；全部失败则打印友好配置提示并 `sys.exit(1)`
+- `config.json` 不存在或解析失败视为无可用方案，同样触发提示并退出
+
+### 变更文件
+- `main.py`：
+  - 导入行新增 `load_config as _llm_load_config` 和 `_load_env as _llm_load_env`
+  - 新增 `_check_profile_ready()` 函数（含配置加载、方案枚举、全量验证逻辑）
+  - 新增 `_validate_profile()` 辅助函数（单方案可用性验证）
+  - 新增 `_print_no_profile_hint()` 辅助函数（友好错误提示）
+  - `main()` 入口第一行调用 `_check_profile_ready()`
+
+### 验证方法
+临时注释 .env 中的 API Key 后运行 `python main.py test\<任意>.html`，应在解析 HTML 之前打印配置缺失提示并退出（exit code 1）；恢复 API Key 后正常运行。
+
+---
