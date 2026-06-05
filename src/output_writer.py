@@ -29,18 +29,28 @@ def _safe_stem(input_path: str | Path) -> str:
     return ascii_stem if ascii_stem else 'work'
 
 
-def get_output_paths(input_path: str | Path) -> dict[str, Path]:
+def get_output_paths(input_path: str | Path, output_dir: Optional[str | Path] = None) -> dict[str, Path]:
     """
-    返回三种输出格式的完整路径，均与输入文件同目录，文件名为纯 ASCII。
+    返回三种输出格式的完整路径。
+
+    output_dir 为 None 时（默认），在 HTML 文件所在目录下创建以文件名主干命名的子文件夹
+    （例如 novels/MyFic.html → 输出到 novels/MyFic/）。
+    output_dir 指定时，输出到该目录（自动创建）。
+    文件名统一使用纯 ASCII 主干，规避 Windows 编码问题。
     """
     p = Path(input_path).resolve()
     stem = _safe_stem(p)
+    base: Path
+    if output_dir is not None:
+        base = Path(output_dir).resolve()
+    else:
+        base = p.parent / stem
+    base.mkdir(parents=True, exist_ok=True)
     base_name = stem + '_translated'
-    parent = p.parent
     return {
-        'txt':  parent / f'{base_name}.txt',
-        'md':   parent / f'{base_name}.md',
-        'docx': parent / f'{base_name}.docx',
+        'txt':  base / f'{base_name}.txt',
+        'md':   base / f'{base_name}.md',
+        'docx': base / f'{base_name}.docx',
     }
 
 
@@ -220,6 +230,7 @@ def write_all(
     *,
     skip_pause: bool = False,
     reference_doc: Optional[str | Path] = None,
+    output_dir: Optional[str | Path] = None,
 ) -> dict[str, Path]:
     """
     完整三步输出流程：
@@ -230,8 +241,11 @@ def write_all(
       5. 第二次暂停，等待用户检视 Markdown（skip_pause=True 时跳过）
       6. pandoc → docx（可选使用 reference_doc 模板）
     返回包含 txt/md/docx 三个输出路径的字典。
+
+    output_dir 为 None 时（默认），输出到 HTML 文件同级的同名子文件夹；
+    否则输出到指定目录。
     """
-    paths = get_output_paths(input_path)
+    paths = get_output_paths(input_path, output_dir=output_dir)
 
     write_txt(result, paths['txt'])
 

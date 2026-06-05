@@ -15,6 +15,7 @@ main.py — ATO3 主流程入口
     --skip-polish           跳过润色步骤
     --skip-term-extract     跳过术语提取，直接使用现有词典
     --profile NAME          使用指定的模型方案（fast/balanced/quality 或自定义方案名）
+    --output-dir PATH       指定输出文件夹路径（默认：HTML 文件同级目录下创建同名子文件夹）
 """
 
 from __future__ import annotations
@@ -194,6 +195,10 @@ def _parse_args(argv=None) -> argparse.Namespace:
         help='使用指定的模型方案（如 fast / balanced / quality）。'
              '未指定时使用 config.json 中的 default_profile，或旧版 agents 字段。',
     )
+    parser.add_argument(
+        '--output-dir', default=None, metavar='PATH',
+        help='指定输出文件夹路径。默认在 HTML 文件同级目录下创建同名子文件夹。',
+    )
     return parser.parse_args(argv)
 
 
@@ -329,6 +334,11 @@ def _interactive_input() -> list[str]:
         docx_tpl = input('docx 模板路径（回车跳过，不使用模板）：').strip().strip('"').strip("'")
         if docx_tpl:
             argv.extend(['--docx-template', docx_tpl])
+
+    # 9. 输出目录（可选，默认使用 HTML 同级同名子文件夹）
+    out_dir = input('输出目录（回车使用默认：HTML 同级同名文件夹）：').strip().strip('"').strip("'")
+    if out_dir:
+        argv.extend(['--output-dir', out_dir])
 
     print()
     print(f'等价命令：python main.py {" ".join(argv)}')
@@ -638,8 +648,9 @@ def main(argv=None) -> int:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     step('输出文件（txt → 精校暂停 → Markdown → 检视暂停 → docx）')
     reference_doc = Path(args.docx_template) if args.docx_template else None
+    output_dir = args.output_dir if args.output_dir else None
     try:
-        output_paths = write_all(work, html_path, reference_doc=reference_doc)
+        output_paths = write_all(work, html_path, reference_doc=reference_doc, output_dir=output_dir)
     except Exception as e:
         print(f'[错误] 输出失败：{e}')
         return 1

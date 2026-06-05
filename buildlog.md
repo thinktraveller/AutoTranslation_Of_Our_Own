@@ -472,3 +472,28 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 - 步骤 13 全部完成，构建全部结束
 
 ---
+
+## [2026-06-05 15:13] 步骤 14 完成：输出文件目录规范
+
+### 执行的任务
+- 修改 `src/output_writer.py` 的 `get_output_paths()` 函数，新增 `output_dir` 参数：
+  - `output_dir=None`（默认）时，在 HTML 文件同级目录下创建以文件名主干命名的子文件夹（如 `novels/MyFic.html` → 输出到 `novels/MyFic/`）
+  - `output_dir` 指定时，输出到该目录（自动 `mkdir(parents=True, exist_ok=True)`）
+- 修改 `src/output_writer.py` 的 `write_all()` 函数，新增 `output_dir` 参数并透传给 `get_output_paths()`
+- 在 `main.py` 的 `_parse_args()` 中新增 `--output-dir PATH` CLI 参数
+- 在 `main.py` 的主流程中将 `args.output_dir` 传递给 `write_all(output_dir=output_dir)`
+- 在 `main.py` 的 `_interactive_input()` 末尾（步骤 9）新增输出目录询问，回车跳过使用默认
+- 更新 `main.py` 顶部 docstring，补充 `--output-dir` 参数说明
+- 创建验证脚本 `_verify/step14_check_output_dir.py`（6 类 11 项检查），全部通过后已删除
+
+### 关键变更
+- `src/output_writer.py`：`get_output_paths()` 新增 `output_dir` 参数，默认输出至同名子文件夹并自动创建；`write_all()` 新增 `output_dir` 参数
+- `main.py`：新增 `--output-dir` CLI 参数，主流程传参，交互式流程新增步骤 9 询问
+
+### 遇到的问题及解决方案
+- 无
+
+### 下一步计划
+- 步骤 14 全部完成，构建全部结束
+
+---
