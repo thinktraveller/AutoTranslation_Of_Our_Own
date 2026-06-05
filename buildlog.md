@@ -199,3 +199,44 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 ### 下一步计划
 - ✅ 构建已全部完成，无待执行步骤
+
+---
+
+## [2026-06-05 09:35] 步骤 11 完成：Bug 修复与优化计划（B-1 至 B-7、O-1 至 O-3）
+
+### 执行的任务
+
+**Bug 修复（P0）**
+- B-1：`--source-lang` 参数现已实际传递给 term_extractor / translator / polisher 三个 agent 的提示词，提示词中的语言描述由硬编码「英文」改为动态插值（`{source_lang}`）；交互式启动流程增加源语言询问步骤
+- B-2：术语确认流程新增「仅本次使用（t）」选项，选 t 的术语存入临时 `session_terms` 字典，在本次翻译提示词中生效但不写入词典文件；`extract_and_confirm()` 返回值从 `dict` 扩展为 `tuple[dict, dict]`，`main.py` 同步更新调用逻辑
+
+**Bug 修复（P1 输出质量）**
+- B-5：HTML 解析时新增对 `Language` 字段的过滤（与 `Stats` 并列），Language dd 不再出现在翻译后的 Markdown 和 docx 中
+- B-6：`ParsedWork` 新增 `source_url` 字段；`html_parser.py` 解析 `<link rel="canonical">` 或页面内 AO3 作品链接；`output_writer.py` 在 Markdown 末尾追加「原文链接：」段落
+- B-7：`output_writer.py` 中二级标题 `## 标签信息` 改为 `## Tags`，`## 摘要` 改为 `## Summary`
+
+**Bug 修复（P1 流程完整性）**
+- B-3：`output_writer.py` 新增 `pause_before_docx()` 函数；`write_all()` 在 Markdown 生成后、pandoc 转换前插入第二次暂停，供用户检视 Markdown
+- B-4：`write_docx()` 新增 `reference_doc` 参数，支持 `--reference-doc` 模板；`main.py` 新增 `--docx-template PATH` CLI 参数；交互式启动新增 docx 模板询问步骤
+
+**优化项（P2/P3）**
+- O-3：`dict_manager.py` 的删除词条界面改进，展示带序号的词条列表，支持输入纯数字序号或原文文本两种方式删除，向下兼容
+- O-1：`html_parser.py` 新增章节边界解析（多章作品按 `div[id^='chapter-']` 拆分，单章回退为 `[body]`），`ParsedWork` 新增 `chapters` 字段；`polisher.py` 实现三种批次模式（full/chapter/paragraph），由 `config.json` 的 `agents.polisher.polish_batch_mode` 控制；`config.json` 新增 `polish_batch_mode` 和 `polish_context_token_limit` 字段
+- O-2：`llm_config.py` 新增 `_edit_agent_prompt()` 函数，CLI 菜单新增「查看/编辑 Agent 提示词」选项（选项 4），支持多行输入/删除，保存到 `config.json` 的 `agents.<name>.system_prompt`；三个 agent 模块（term_extractor / translator / polisher）均优先读取 config 中的 `system_prompt` 字段，回退到模块内置默认值；`get_agent_config()` 修改为返回完整 agent 配置（含所有自定义字段）
+
+### 关键变更
+- `src/html_parser.py`：新增 `source_url` 字段、`chapters` 字段、Language 过滤、章节边界解析
+- `src/output_writer.py`：B-3 第二次暂停、B-4 reference_doc 支持、B-6 原文链接、B-7 章节标题
+- `src/term_extractor.py`：B-1 source_lang 参数、B-2 session_terms、O-2 自定义提示词支持
+- `src/translator.py`：B-1 source_lang 参数、O-2 自定义提示词支持
+- `src/polisher.py`：B-1 source_lang 参数、O-1 三种批次模式、O-2 自定义提示词支持
+- `src/dict_manager.py`：O-3 序号删除支持
+- `src/llm_config.py`：O-2 _edit_agent_prompt 菜单、get_agent_config 返回完整字段
+- `main.py`：B-1/B-2/B-4 参数传递更新、交互式输入新增步骤
+- `config.json`：O-1 新增 polish_batch_mode 和 polish_context_token_limit 字段
+
+### 遇到的问题及解决方案
+- B-2 引入新返回值后 main.py 原有 else 分支产生双重 else，已合并为单一 else 分支
+
+### 下一步计划
+- ✅ 步骤 11 全部子项（B-1 至 B-7、O-1 至 O-3）已完成，构建全部结束

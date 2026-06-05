@@ -1,29 +1,31 @@
 {
   "providers": {
-    "openai": {
-      "base_url": "https://api.openai.com/v1",
-      "api_key_env": "OPENAI_API_KEY"
-    },
     "deepseek": {
       "base_url": "https://api.deepseek.com/v1",
       "api_key_env": "DEEPSEEK_API_KEY"
+    },
+    "thinktraveller": {
+      "base_url": "https://llm.thinktraveller.xyz/v1",
+      "api_key_env": "THINKTRAVELLER_API_KEY"
     }
   },
   "agents": {
     "term_extractor": {
       "provider": "deepseek",
-      "model": "deepseek-chat",
+      "model": "deepseek-v4-flash",
       "temperature": 0.1
     },
     "translator": {
-      "provider": "deepseek",
-      "model": "deepseek-chat",
+      "provider": "thinktraveller",
+      "model": "local-qwen3.6-27b-uncensored:latest",
       "temperature": 0.3
     },
     "polisher": {
-      "provider": "openai",
-      "model": "gpt-4o",
-      "temperature": 0.7
+      "provider": "thinktraveller",
+      "model": "local-qwen3.6-27b-uncensored:latest",
+      "temperature": 0.7,
+      "polish_batch_mode": "paragraph",
+      "polish_context_token_limit": 60000
     }
   }
 }

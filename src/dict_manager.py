@@ -259,21 +259,48 @@ def _menu_add_term(path: Path, data: dict) -> None:
 
 
 def _menu_delete_term(path: Path, data: dict) -> None:
-    """删除词条。"""
+    """
+    删除词条。支持两种输入方式：
+    - 输入纯数字：按序号定位（序号与「查看词条」显示的编号一致）
+    - 输入文本：按原文精确匹配（原有逻辑，向下兼容）
+    """
     _print_header("删除词条")
     terms = data["terms"]
     if not terms:
         print("  词典为空，无可删除词条。")
         _pause()
         return
-    src = _prompt("请输入要删除的原文（回车取消）")
-    if not src:
+
+    # 展示词条列表（带序号，与查看界面保持一致）
+    term_keys = list(terms.keys())
+    print(f"  共 {len(term_keys)} 条词条：\n")
+    for i, k in enumerate(term_keys, 1):
+        print(f"  {i:>4}. {k}  →  {terms[k]}")
+
+    raw = _prompt("\n请输入要删除的词条序号或原文（回车取消）")
+    if not raw:
         print("  已取消。")
         return
-    if src not in terms:
-        print(f"  未找到词条：{src}")
-        _pause()
-        return
+
+    # 判断是否为纯数字序号
+    src: str | None = None
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(term_keys):
+            src = term_keys[idx]
+        else:
+            print(f"  序号 {raw} 超出范围（1-{len(term_keys)}）。")
+            _pause()
+            return
+    else:
+        # 文本精确匹配（原有逻辑）
+        if raw in terms:
+            src = raw
+        else:
+            print(f"  未找到词条：{raw}")
+            _pause()
+            return
+
     confirm = _prompt(
         f"  确认删除「{src} → {terms[src]}」？(y/n)", "n"
     ).lower()

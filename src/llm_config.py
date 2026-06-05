@@ -120,13 +120,16 @@ def get_agent_config(agent_name: str) -> dict:
 
     provider_cfg = config["providers"][provider_name]
 
-    return {
+    # 将 agent 的所有字段合并返回（包含 polish_batch_mode、system_prompt 等自定义字段）
+    result = {**agent_cfg}
+    result.update({
         "provider": provider_name,
         "base_url": provider_cfg["base_url"],
         "api_key_env": provider_cfg["api_key_env"],
         "model": agent_cfg["model"],
         "temperature": agent_cfg.get("temperature", 0.3),
-    }
+    })
+    return result
 
 
 def get_client(agent_name: str):
@@ -212,11 +215,25 @@ def _edit_provider(config: dict) -> None:
     default_env = existing.get("api_key_env", f"{name.upper()}_API_KEY")
 
     base_url = input(f"base_url [{default_url}]：").strip() or default_url
+
+    print("  （此处填写环境变量的【名称】，例如 OPENAI_API_KEY；实际密钥值请写入 .env 文件）")
     api_key_env = input(f"API Key 环境变量名 [{default_env}]：").strip() or default_env
+
+    # 防误填：若输入值看起来是密钥本身（含非字母下划线字符且较长），给出警告
+    import re as _re
+    if len(api_key_env) > 30 or _re.search(r'[^A-Z0-9_a-z]', api_key_env):
+        print(f"  ⚠️  警告：'{api_key_env}' 看起来像密钥值而非变量名。")
+        print(f"       变量名应为全大写字母+下划线格式，例如：{default_env}")
+        print(f"       实际密钥请写入 .env 文件：{api_key_env[:4]}... = <你的密钥>")
+        confirm = input("  确认使用此值作为环境变量名？(y/N)：").strip().lower()
+        if confirm != 'y':
+            print("  操作取消，请重新运行并填写正确的变量名。")
+            return
 
     config["providers"][name] = {"base_url": base_url, "api_key_env": api_key_env}
     save_config(config)
     print(f"提供商 '{name}' 已保存。")
+    print(f"  → 请在项目根目录的 .env 文件中添加：{api_key_env}=你的密钥")
 
 
 def _edit_agent(config: dict) -> None:
@@ -243,6 +260,78 @@ def _edit_agent(config: dict) -> None:
     config["agents"][name] = {"provider": provider, "model": model, "temperature": temperature}
     save_config(config)
     print(f"Agent '{name}' 已保存。")
+
+
+def _edit_agent_prompt(config: dict) -> None:
+    """
+    查看或编辑 agent 的系统提示词。
+    提示词存储在 config.json 的 agents.<name>.system_prompt 字段中（可选）。
+    若字段不存在，各 agent 模块将使用其内置默认提示词。
+    """
+    print("\n--- 查看/编辑 Agent 提示词 ---")
+    agents = list(config.get("agents", {}).keys())
+    if not agents:
+        print("暂无 agent 配置。")
+        return
+    print("已有 agents：", agents)
+    name = input("请输入要编辑的 agent 名称（回车取消）：").strip()
+    if not name:
+        print("操作取消。")
+        return
+    if name not in config.get("agents", {}):
+        print(f"Agent '{name}' 不存在。")
+        return
+
+    agent_data = config["agents"][name]
+    current_prompt = agent_data.get("system_prompt", "")
+
+    if current_prompt:
+        print(f"\n当前自定义提示词（{len(current_prompt)} 字符）：")
+        print("-" * 40)
+        print(current_prompt[:500] + ("..." if len(current_prompt) > 500 else ""))
+        print("-" * 40)
+    else:
+        print(f"\n当前未设置自定义提示词（将使用 {name} 模块内置默认值）。")
+
+    print()
+    print("操作：[e] 编辑提示词  [d] 删除自定义提示词（恢复默认）  [q] 取消")
+    action = input("请选择：").strip().lower()
+
+    if action == "d":
+        if "system_prompt" in agent_data:
+            del agent_data["system_prompt"]
+            save_config(config)
+            print(f"已删除 agent '{name}' 的自定义提示词，将使用模块默认值。")
+        else:
+            print("当前无自定义提示词，无需删除。")
+    elif action == "e":
+        print()
+        print("请逐行输入新的系统提示词。")
+        print("输入完成后，在新的一行只输入「END」（不含引号）并回车确认。")
+        print("输入「CANCEL」取消操作。")
+        print("-" * 40)
+        lines: list[str] = []
+        while True:
+            try:
+                line = input()
+            except EOFError:
+                break
+            if line.strip() == "END":
+                break
+            if line.strip() == "CANCEL":
+                print("操作取消，提示词未修改。")
+                return
+            lines.append(line)
+        new_prompt = "\n".join(lines).strip()
+        if not new_prompt:
+            print("提示词为空，操作取消。")
+            return
+        agent_data["system_prompt"] = new_prompt
+        save_config(config)
+        print(f"已保存 agent '{name}' 的自定义提示词（{len(new_prompt)} 字符）。")
+        print("注意：各 agent 模块会在下次调用时优先使用 config.json 中的提示词。")
+    else:
+        print("操作取消。")
 
 
 def _delete_provider(config: dict) -> None:
@@ -297,20 +386,15 @@ def run_cli() -> None:
 
     _show_current_config(config)
 
-    menu = {
-        "1": ("查看当前配置", lambda: _show_current_config(load_config())),
-        "2": ("添加/修改提供商", lambda: _edit_provider(load_config()) or None),
-        "3": ("添加/修改 Agent", lambda: _edit_agent(load_config()) or None),
-        "4": ("删除提供商", lambda: _delete_provider(load_config()) or None),
-        "5": ("退出", None),
-    }
-
-    # 对于修改操作，需要传入可变的 config 引用，重新实现菜单处理
     while True:
         print()
         print("请选择操作：")
-        for key, (desc, _) in menu.items():
-            print(f"  {key}. {desc}")
+        print("  1. 查看当前配置")
+        print("  2. 添加/修改提供商")
+        print("  3. 添加/修改 Agent（模型/提供商/温度）")
+        print("  4. 查看/编辑 Agent 提示词")
+        print("  5. 删除提供商")
+        print("  6. 退出")
         choice = input("输入数字：").strip()
 
         if choice == "1":
@@ -324,8 +408,11 @@ def run_cli() -> None:
             _edit_agent(config)
         elif choice == "4":
             config = load_config()
-            _delete_provider(config)
+            _edit_agent_prompt(config)
         elif choice == "5":
+            config = load_config()
+            _delete_provider(config)
+        elif choice == "6":
             print("退出配置编辑器。")
             break
         else:

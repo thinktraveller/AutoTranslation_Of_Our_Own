@@ -45,6 +45,10 @@ class ParsedWork:
     body: list[TranslatableBlock]           # 正文段落列表
     endnotes: list[TranslatableBlock]       # 尾注段落
     raw_html: str                           # 原始 HTML，保留用于最终输出重建
+    source_url: str = ""                    # AO3 原文链接（解析失败时为空字符串）
+    chapters: list[list[TranslatableBlock]] = field(default_factory=list)
+    # 章节边界列表，每个元素是一章的 TranslatableBlock 列表（切分自 body）
+    # 单章作品时 chapters = [body]；多章时按 AO3 章节容器拆分
 
 
 # ---------------------------------------------------------------------------
@@ -155,9 +159,9 @@ def parse_ao3_html(html_path: str | Path) -> ParsedWork:
             if not isinstance(child, Tag):
                 continue
             if child.name == "dt":
-                # 检测到 "Stats:" 标签，下一个 dd 不翻译
+                # 检测到 "Stats:" 或 "Language:" 标签，下一个 dd 跳过
                 dt_text = _extract_text(child).lower()
-                skip_next_dd = "stats" in dt_text
+                skip_next_dd = "stats" in dt_text or "language" in dt_text
             elif child.name == "dd":
                 if skip_next_dd:
                     skip_next_dd = False
@@ -202,16 +206,32 @@ def parse_ao3_html(html_path: str | Path) -> ParsedWork:
             notes = _blocks_from_userstuff(notes_bq, "notes", "note")
 
     # ------------------------------------------------------------------
-    # 6. 正文（#chapters 内 .userstuff p）
+    # 6. 正文（#chapters 内 .userstuff p）及章节边界
     # ------------------------------------------------------------------
     body: list[TranslatableBlock] = []
+    chapters_list: list[list[TranslatableBlock]] = []
     chapters_div = soup.select_one("#chapters")
     if chapters_div:
-        # AO3 下载的 HTML 中正文在 #chapters 内的 .userstuff div 中
-        userstuff_div = chapters_div.select_one("div.userstuff")
-        if userstuff_div is None:
-            userstuff_div = chapters_div  # 容错：整个 chapters 块
-        body = _blocks_from_userstuff(userstuff_div, "body", "body")
+        # AO3 多章：每章在独立的 div[id^="chapter-"] 容器内
+        chapter_containers = chapters_div.select("div[id^='chapter-']")
+        if chapter_containers:
+            # 多章文件：分章解析
+            for ch_idx, ch_div in enumerate(chapter_containers):
+                userstuff_div = ch_div.select_one("div.userstuff")
+                if userstuff_div is None:
+                    userstuff_div = ch_div
+                ch_blocks = _blocks_from_userstuff(
+                    userstuff_div, "body", f"body_ch{ch_idx:02d}"
+                )
+                chapters_list.append(ch_blocks)
+                body.extend(ch_blocks)
+        else:
+            # 单章文件（最常见）
+            userstuff_div = chapters_div.select_one("div.userstuff")
+            if userstuff_div is None:
+                userstuff_div = chapters_div  # 容错：整个 chapters 块
+            body = _blocks_from_userstuff(userstuff_div, "body", "body")
+            chapters_list = [body]
     else:
         print("[警告] 未找到 #chapters 元素，正文可能为空")
 
@@ -225,6 +245,21 @@ def parse_ao3_html(html_path: str | Path) -> ParsedWork:
         if endnotes_bq:
             endnotes = _blocks_from_userstuff(endnotes_bq, "endnotes", "endnote")
 
+    # ------------------------------------------------------------------
+    # 8. 原文链接（<link rel="canonical"> 或页面内指向 AO3 作品的链接）
+    # ------------------------------------------------------------------
+    source_url = ""
+    canonical_tag = soup.find("link", rel="canonical")
+    if canonical_tag and canonical_tag.get("href"):
+        source_url = str(canonical_tag["href"])
+    if not source_url:
+        # 降级：查找页面内第一个指向 archiveofourown.org/works/ 的链接
+        for a_tag in soup.find_all("a", href=True):
+            href = str(a_tag["href"])
+            if "archiveofourown.org/works/" in href:
+                source_url = href
+                break
+
     return ParsedWork(
         title=title,
         author=author,
@@ -234,6 +269,8 @@ def parse_ao3_html(html_path: str | Path) -> ParsedWork:
         body=body,
         endnotes=endnotes,
         raw_html=raw_html,
+        source_url=source_url,
+        chapters=chapters_list,
     )
 
 

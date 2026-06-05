@@ -87,7 +87,7 @@ def _parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument('html_file', help='AO3 HTML 文件路径')
     parser.add_argument(
         '--source-lang', default='en', metavar='LANG',
-        help='源语言（默认：en）',
+        help='源语言代码（默认：en；可选 ja/ko/fr/de/es/ru 等）',
     )
     parser.add_argument(
         '--general-dict', default=None, metavar='PATH',
@@ -108,6 +108,10 @@ def _parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         '--skip-term-extract', action='store_true',
         help='跳过术语提取，直接使用现有词典',
+    )
+    parser.add_argument(
+        '--docx-template', default=None, metavar='PATH',
+        help='pandoc --reference-doc 模板路径（可选，用于指定 docx 字体/样式）',
     )
     return parser.parse_args(argv)
 
@@ -146,7 +150,13 @@ def _interactive_input() -> list[str]:
         argv.append(raw)
         break
 
-    # 2. 是否跳过术语提取
+    # 2. 源语言（默认 en）
+    print('  可选语言代码：en（英文）/ ja（日文）/ ko（韩文）/ fr（法文）/ de（德文）/ es（西班牙文）/ ru（俄文）')
+    source_lang_input = input('源语言代码（回车使用默认值 en）：').strip().lower()
+    if source_lang_input and source_lang_input != 'en':
+        argv.extend(['--source-lang', source_lang_input])
+
+    # 3. 是否跳过术语提取
     skip_extract = input('跳过术语提取？直接使用现有词典 (y/N): ').strip().lower()
     if skip_extract == 'y':
         argv.append('--skip-term-extract')
@@ -165,6 +175,11 @@ def _interactive_input() -> list[str]:
     no_general = input('禁用通用词典？(y/N): ').strip().lower()
     if no_general == 'y':
         argv.append('--no-general-dict')
+
+    # 6. docx 模板（可选）
+    docx_tpl = input('docx 模板路径（回车跳过，不使用模板）：').strip().strip('"').strip("'")
+    if docx_tpl:
+        argv.extend(['--docx-template', docx_tpl])
 
     print()
     print(f'等价命令：python main.py {" ".join(argv)}')
@@ -270,11 +285,12 @@ def main(argv=None) -> int:
         step('术语提取与 CLI 确认')
         all_blocks = work.body + work.tags + work.summary + work.notes + work.endnotes
         try:
-            new_terms = extract_and_confirm(all_blocks, existing_terms=term_map)
+            new_terms, session_terms = extract_and_confirm(all_blocks, existing_terms=term_map, source_lang=args.source_lang)
         except Exception as e:
             print(f'  [警告] 术语提取失败：{e}')
             print('  继续使用现有词典翻译。')
             new_terms = {}
+            session_terms = {}
 
         if new_terms:
             _save_ip_dict(ip_dict_path, ip_data, new_terms)
@@ -282,7 +298,12 @@ def main(argv=None) -> int:
             print(f'  词典已更新，共 {len(term_map)} 条术语可用。')
         else:
             print('  无新术语加入词典。')
+
+        if session_terms:
+            term_map.update(session_terms)
+            print(f'  临时术语表：{len(session_terms)} 条（仅本次翻译有效，不写入词典）。')
     else:
+        session_terms = {}
         print('\n[跳过] 术语提取（--skip-term-extract）')
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -305,7 +326,7 @@ def main(argv=None) -> int:
     if pending_non_body:
         print(f'  翻译非正文区（{len(pending_non_body)} 段）...')
         try:
-            translate_work(pending_non_body, term_map=term_map)
+            translate_work(pending_non_body, term_map=term_map, source_lang=args.source_lang)
         except Exception as e:
             print(f'  [警告] 非正文区翻译失败：{e}，将使用原文代替。')
 
@@ -313,7 +334,7 @@ def main(argv=None) -> int:
     if work.body:
         print(f'  翻译正文（{len(work.body)} 段）...')
         try:
-            translate_work(work.body, term_map=term_map, progress_path=progress_path)
+            translate_work(work.body, term_map=term_map, progress_path=progress_path, source_lang=args.source_lang)
         except Exception as e:
             print(f'  [错误] 正文翻译失败：{e}')
             print(f'  已翻译内容已保存至：{progress_path}')
@@ -335,7 +356,7 @@ def main(argv=None) -> int:
     if not args.skip_polish:
         step('润色正文')
         try:
-            polish_work(work.body, skip_polish=False)
+            polish_work(work.body, skip_polish=False, source_lang=args.source_lang, chapters=work.chapters)
         except Exception as e:
             print(f'  [警告] 润色失败：{e}，跳过润色使用翻译原文继续。')
     else:
@@ -344,9 +365,10 @@ def main(argv=None) -> int:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # 7. 输出 txt / Markdown / docx
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    step('输出文件（txt → 精校暂停 → Markdown → docx）')
+    step('输出文件（txt → 精校暂停 → Markdown → 检视暂停 → docx）')
+    reference_doc = Path(args.docx_template) if args.docx_template else None
     try:
-        output_paths = write_all(work, html_path)
+        output_paths = write_all(work, html_path, reference_doc=reference_doc)
     except Exception as e:
         print(f'[错误] 输出失败：{e}')
         return 1

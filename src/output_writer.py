@@ -93,7 +93,7 @@ def write_markdown(
     lines.append('')
 
     if result.tags:
-        lines.append('## 标签信息')
+        lines.append('## Tags')
         lines.append('')
         for block in result.tags:
             text = block.translation if block.translation else block.text
@@ -101,7 +101,7 @@ def write_markdown(
         lines.append('')
 
     if result.summary:
-        lines.append('## 摘要')
+        lines.append('## Summary')
         lines.append('')
         for block in result.summary:
             text = block.translation if block.translation else block.text
@@ -136,6 +136,13 @@ def write_markdown(
             lines.append(text)
             lines.append('')
 
+    # 原文链接（若解析到）
+    if result.source_url:
+        lines.append('---')
+        lines.append('')
+        lines.append(f'原文链接：<{result.source_url}>')
+        lines.append('')
+
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines))
     print(f'[输出] Markdown 已生成：{output_path}')
@@ -145,20 +152,33 @@ def write_markdown(
 # docx 输出（pandoc）
 # ---------------------------------------------------------------------------
 
-def write_docx(md_path: str | Path, docx_path: str | Path) -> None:
+def write_docx(
+    md_path: str | Path,
+    docx_path: str | Path,
+    reference_doc: Optional[str | Path] = None,
+) -> None:
     """
     调用 pandoc 将 Markdown 转换为 docx。
     通过 cwd=文件所在目录 + 纯文件名参数规避 Windows 路径编码问题。
     输入输出文件名已为纯 ASCII，不存在编码风险。
+
+    参数
+    ----
+    reference_doc : 可选，pandoc --reference-doc 模板路径（用于指定字体/样式）
     """
     md = Path(md_path).resolve()
     docx = Path(docx_path).resolve()
 
     assert md.exists(), f'输入文件不存在：{md}'
 
+    cmd = ['pandoc', md.name, '-o', docx.name]
+    if reference_doc is not None:
+        ref = Path(reference_doc).resolve()
+        cmd += [f'--reference-doc={ref}']
+
     try:
         proc = subprocess.run(
-            ['pandoc', md.name, '-o', docx.name],
+            cmd,
             cwd=str(md.parent),
             capture_output=True,
             text=True,
@@ -174,8 +194,9 @@ def write_docx(md_path: str | Path, docx_path: str | Path) -> None:
     except Exception as e:
         print(f'[警告] pandoc 转换失败：{e}')
         print('可手动执行：')
+        ref_arg = f' --reference-doc="{reference_doc}"' if reference_doc else ''
         print(f'  cd "{md.parent}"')
-        print(f'  pandoc "{md.name}" -o "{docx.name}"')
+        print(f'  pandoc "{md.name}" -o "{docx.name}"{ref_arg}')
         raise
 
 
@@ -183,11 +204,22 @@ def write_docx(md_path: str | Path, docx_path: str | Path) -> None:
 # 完整输出流程
 # ---------------------------------------------------------------------------
 
+def pause_before_docx(md_path: str | Path) -> None:
+    """
+    在 Markdown 生成后、docx 转换前插入第二次暂停，
+    给用户检视或手动编辑 Markdown 的窗口期。
+    """
+    print(f'\n[步骤完成] Markdown 已生成：{md_path}')
+    print('请检视 Markdown 文件，确认格式无误后按回车键继续生成 docx...')
+    input()
+
+
 def write_all(
     result: ParsedWork,
     input_path: str | Path,
     *,
     skip_pause: bool = False,
+    reference_doc: Optional[str | Path] = None,
 ) -> dict[str, Path]:
     """
     完整三步输出流程：
@@ -195,7 +227,8 @@ def write_all(
       2. 暂停等待用户精校（skip_pause=True 时跳过，用于测试）
       3. 读取精校结果，回填 result.body
       4. 写 Markdown
-      5. pandoc → docx
+      5. 第二次暂停，等待用户检视 Markdown（skip_pause=True 时跳过）
+      6. pandoc → docx（可选使用 reference_doc 模板）
     返回包含 txt/md/docx 三个输出路径的字典。
     """
     paths = get_output_paths(input_path)
@@ -221,7 +254,12 @@ def write_all(
                 block.translation = proofread_paragraphs[i]
 
     write_markdown(result, paths['md'], proofread_paragraphs=proofread_paragraphs)
-    write_docx(paths['md'], paths['docx'])
+
+    # 第二次暂停：给用户检视 Markdown 的机会
+    if not skip_pause:
+        pause_before_docx(paths['md'])
+
+    write_docx(paths['md'], paths['docx'], reference_doc=reference_doc)
 
     print('\n[完成] 三种格式已全部生成：')
     print(f'  txt  → {paths["txt"]}')

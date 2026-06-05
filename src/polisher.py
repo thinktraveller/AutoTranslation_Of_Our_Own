@@ -34,9 +34,10 @@ if TYPE_CHECKING:
 
 # get_client / get_agent_config 在模块顶层引用，使 patch("polisher.get_client") 生效。
 try:
-    from .llm_config import get_client
+    from .llm_config import get_client, get_agent_config
 except ImportError:
     get_client = None  # type: ignore[assignment]
+    get_agent_config = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -55,8 +56,26 @@ PARAGRAPH_SEP = "---PARAGRAPH_SEP---"
 # 提示词
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """\
-你是一名资深的简体中文同人文编辑，请对以下已翻译的文本进行润色：
+# 源语言代码到中文名称的映射（与 translator.py 保持一致）
+_LANG_NAMES: dict[str, str] = {
+    "en": "英文",
+    "ja": "日文",
+    "ko": "韩文",
+    "fr": "法文",
+    "de": "德文",
+    "es": "西班牙文",
+    "ru": "俄文",
+    "zh": "中文",
+}
+
+
+def _get_lang_name(source_lang: str) -> str:
+    """将语言代码转换为中文名称，未知代码直接返回原值。"""
+    return _LANG_NAMES.get(source_lang.lower(), source_lang)
+
+
+_SYSTEM_PROMPT_TEMPLATE = """\
+你是一名资深的简体中文同人文编辑，以下文本由{source_lang}翻译而来，请对其进行润色：
 1. 对话部分统一使用「」引号（或根据文章整体风格决定），确保对话标点规范
 2. 修正不通顺的句子，但不改变原文意思
 3. 中文标点（逗号、句号、问号、感叹号）使用全角形式
@@ -72,19 +91,22 @@ _SYSTEM_PROMPT = """\
 # ---------------------------------------------------------------------------
 
 
-def _call_llm(text: str, client, agent_cfg: dict) -> str | None:
+def _call_llm(text: str, client, agent_cfg: dict, system_prompt: str | None = None) -> str | None:
     """
     向 LLM 发送润色请求，返回润色后的文本字符串。
     带指数退避重试（最多 MAX_RETRIES 次）。
     所有重试均失败时返回 None。
+    system_prompt 为 None 时使用默认英文提示词。
     """
+    if system_prompt is None:
+        system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(source_lang=_get_lang_name("en"))
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = client.chat.completions.create(
                 model=agent_cfg["model"],
                 temperature=agent_cfg["temperature"],
                 messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text},
                 ],
             )
@@ -111,6 +133,7 @@ def _polish_batch(
     agent_cfg: dict,
     batch_index: int,
     total_batches: int,
+    system_prompt: str | None = None,
 ) -> None:
     """
     润色一批 TranslatableBlock，就地覆盖 translation 字段。
@@ -128,7 +151,7 @@ def _polish_batch(
     # 单段直接润色，不使用分隔符
     if len(valid) == 1:
         print(f"  批次 {batch_index}/{total_batches}（1 段）...", end=" ", flush=True)
-        result = _call_llm(valid[0].translation, client, agent_cfg)
+        result = _call_llm(valid[0].translation, client, agent_cfg, system_prompt=system_prompt)
         if result is not None:
             valid[0].translation = result
             print("完成")
@@ -143,11 +166,11 @@ def _polish_batch(
         end=" ",
         flush=True,
     )
-    raw_result = _call_llm(combined, client, agent_cfg)
+    raw_result = _call_llm(combined, client, agent_cfg, system_prompt=system_prompt)
 
     if raw_result is None:
         print("失败，批次降级为逐段润色...")
-        _fallback_polish_one_by_one(valid, client, agent_cfg)
+        _fallback_polish_one_by_one(valid, client, agent_cfg, system_prompt=system_prompt)
         return
 
     # 按分隔符拆分润色结果
@@ -157,7 +180,7 @@ def _polish_batch(
         print(
             f"段落数不匹配（期望 {len(valid)}，实际 {len(parts)}），降级为逐段润色..."
         )
-        _fallback_polish_one_by_one(valid, client, agent_cfg)
+        _fallback_polish_one_by_one(valid, client, agent_cfg, system_prompt=system_prompt)
         return
 
     for block, polished_text in zip(valid, parts):
@@ -169,13 +192,14 @@ def _fallback_polish_one_by_one(
     batch: list,
     client,
     agent_cfg: dict,
+    system_prompt: str | None = None,
 ) -> None:
     """降级方案：对批次中每段逐一单独润色。"""
     for i, block in enumerate(batch, 1):
         if not block.translation or not block.translation.strip():
             continue
         print(f"    降级润色第 {i}/{len(batch)} 段...", end=" ", flush=True)
-        result = _call_llm(block.translation, client, agent_cfg)
+        result = _call_llm(block.translation, client, agent_cfg, system_prompt=system_prompt)
         if result is not None:
             block.translation = result
             print("完成")
@@ -188,10 +212,93 @@ def _fallback_polish_one_by_one(
 # ---------------------------------------------------------------------------
 
 
+def _polish_full(
+    blocks: list,
+    client,
+    agent_cfg: dict,
+    system_prompt: str,
+    token_limit: int,
+) -> None:
+    """
+    全文模式润色：将全部有译文段落拼为一个请求。
+    若估算 token 数超过 token_limit，自动降级为段落模式。
+    """
+    translatable = [b for b in blocks if b.translation and b.translation.strip()]
+    if not translatable:
+        return
+
+    combined = f"\n\n{PARAGRAPH_SEP}\n\n".join(b.translation for b in translatable)
+    estimated_tokens = len(combined) // 3  # 粗估
+
+    if estimated_tokens > token_limit:
+        print(
+            f"[润色] 全文模式：估算 token 数 ~{estimated_tokens} 超过限制 {token_limit}，"
+            f"自动降级为段落模式。"
+        )
+        _polish_paragraph_mode(blocks, client, agent_cfg, system_prompt)
+        return
+
+    print(
+        f"[润色] 全文模式：{len(translatable)} 段，约 {estimated_tokens} tokens，发送单次请求..."
+    )
+    _polish_batch(translatable, client, agent_cfg, 1, 1, system_prompt=system_prompt)
+
+
+def _polish_chapter_mode(
+    chapters: list[list],
+    client,
+    agent_cfg: dict,
+    system_prompt: str,
+    token_limit: int,
+) -> None:
+    """
+    章节模式润色：每章作为一个请求。
+    若单章估算超过 token_limit，该章降级为段落模式。
+    """
+    total_ch = len(chapters)
+    for ch_idx, ch_blocks in enumerate(chapters, 1):
+        translatable = [b for b in ch_blocks if b.translation and b.translation.strip()]
+        if not translatable:
+            continue
+        combined = f"\n\n{PARAGRAPH_SEP}\n\n".join(b.translation for b in translatable)
+        estimated = len(combined) // 3
+        if estimated > token_limit:
+            print(
+                f"[润色] 章节模式：第 {ch_idx}/{total_ch} 章（~{estimated} tokens 超限），降级为段落模式..."
+            )
+            _polish_paragraph_mode(ch_blocks, client, agent_cfg, system_prompt)
+        else:
+            print(
+                f"[润色] 章节模式：第 {ch_idx}/{total_ch} 章（{len(translatable)} 段，~{estimated} tokens）...",
+                end=" ",
+                flush=True,
+            )
+            _polish_batch(translatable, client, agent_cfg, ch_idx, total_ch, system_prompt=system_prompt)
+
+
+def _polish_paragraph_mode(
+    blocks: list,
+    client,
+    agent_cfg: dict,
+    system_prompt: str,
+) -> None:
+    """段落模式润色（原有逻辑，每批最多 BATCH_SIZE 段）。"""
+    translatable = [b for b in blocks if b.translation and b.translation.strip()]
+    if not translatable:
+        return
+    total_batches = (len(translatable) + BATCH_SIZE - 1) // BATCH_SIZE
+    for i in range(0, len(translatable), BATCH_SIZE):
+        batch = translatable[i : i + BATCH_SIZE]
+        batch_index = i // BATCH_SIZE + 1
+        _polish_batch(batch, client, agent_cfg, batch_index, total_batches, system_prompt=system_prompt)
+
+
 def polish_blocks(
     blocks: list,
     agent: str = "polisher",
     skip_polish: bool = False,
+    source_lang: str = "en",
+    chapters: list[list] | None = None,
 ) -> None:
     """
     对 TranslatableBlock 列表进行润色，就地覆盖每个 block 的 translation 字段。
@@ -201,12 +308,17 @@ def polish_blocks(
     blocks       : TranslatableBlock 列表（来自 html_parser，已完成翻译）
     agent        : 使用的 agent 名称（对应 config.json 中的配置）
     skip_polish  : 若为 True，立即返回，不调用 LLM（对应 --skip-polish 参数）
+    source_lang  : 源语言代码（如 "en"、"ja"），用于提示词中说明译文来源
+    chapters     : ParsedWork.chapters（章节边界列表），chapter 模式时使用
 
     说明
     ----
     - skip_polish=True 时完全跳过，不修改任何 block
     - 只润色有译文的块；无译文的块直接跳过
-    - 每批最多 BATCH_SIZE（10）段，超出则自动分批
+    - 批次模式由 config.json 的 agents.polisher.polish_batch_mode 控制：
+        "paragraph"（默认）: 每批最多 BATCH_SIZE 段
+        "chapter": 每章一批（需要 chapters 参数）
+        "full": 全文一批（超限自动降级）
     - 分隔符不匹配时自动降级为逐段润色
     - 润色结果直接覆盖 translation 字段（不保留原始译文）
     """
@@ -230,16 +342,38 @@ def polish_blocks(
         )
     client, agent_cfg = get_client(agent)
 
+    # 从 config 读取批次模式和自定义提示词（默认 paragraph）
+    batch_mode: str = "paragraph"
+    token_limit: int = 60000
+    custom_prompt: str | None = None
+    try:
+        if get_agent_config is not None:
+            cfg = get_agent_config(agent)
+            batch_mode = cfg.get("polish_batch_mode", "paragraph")
+            token_limit = int(cfg.get("polish_context_token_limit", 60000))
+            custom_prompt = cfg.get("system_prompt") or None
+    except Exception:
+        pass  # 读取失败时静默回退为 paragraph 模式
+
+    # 构建润色提示词（优先使用 config.json 中的自定义提示词）
+    lang_name = _get_lang_name(source_lang)
+    system_prompt = custom_prompt if custom_prompt else _SYSTEM_PROMPT_TEMPLATE.format(source_lang=lang_name)
+
     print(
-        f"[润色] 共 {len(translatable)} 段有译文，分批润色中（每批最多 {BATCH_SIZE} 段）..."
+        f"[润色] 共 {len(translatable)} 段有译文，批次模式：{batch_mode}..."
     )
 
-    # 按原始顺序分批（以 blocks 为基准，保持批次与翻译模块一致）
-    total_batches = (len(translatable) + BATCH_SIZE - 1) // BATCH_SIZE
-    for i in range(0, len(translatable), BATCH_SIZE):
-        batch = translatable[i : i + BATCH_SIZE]
-        batch_index = i // BATCH_SIZE + 1
-        _polish_batch(batch, client, agent_cfg, batch_index, total_batches)
+    if batch_mode == "full":
+        _polish_full(blocks, client, agent_cfg, system_prompt, token_limit)
+    elif batch_mode == "chapter":
+        if chapters:
+            _polish_chapter_mode(chapters, client, agent_cfg, system_prompt, token_limit)
+        else:
+            print("[润色] chapter 模式需要章节数据，降级为 paragraph 模式。")
+            _polish_paragraph_mode(blocks, client, agent_cfg, system_prompt)
+    else:
+        # paragraph 模式（默认）
+        _polish_paragraph_mode(blocks, client, agent_cfg, system_prompt)
 
     print(f"[润色] 完成，共润色 {len(translatable)} 段。")
 
@@ -248,11 +382,13 @@ def polish_work(
     blocks: list,
     agent: str = "polisher",
     skip_polish: bool = False,
+    source_lang: str = "en",
+    chapters: list[list] | None = None,
 ) -> None:
     """
     polish_blocks 的别名，供 main.py 统一调用（接口与计划书一致）。
     """
-    polish_blocks(blocks, agent=agent, skip_polish=skip_polish)
+    polish_blocks(blocks, agent=agent, skip_polish=skip_polish, source_lang=source_lang, chapters=chapters)
 
 
 # ---------------------------------------------------------------------------

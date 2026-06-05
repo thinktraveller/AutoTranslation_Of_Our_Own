@@ -46,9 +46,10 @@ if TYPE_CHECKING:
 
 # get_client 在模块顶层引用，使 patch("translator.get_client") 生效。
 try:
-    from .llm_config import get_client
+    from .llm_config import get_client, get_agent_config as _get_agent_config
 except ImportError:
     get_client = None  # type: ignore[assignment]
+    _get_agent_config = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -67,8 +68,26 @@ PARAGRAPH_SEP = "---PARAGRAPH_SEP---"
 # 提示词构建
 # ---------------------------------------------------------------------------
 
+# 源语言代码到中文名称的映射
+_LANG_NAMES: dict[str, str] = {
+    "en": "英文",
+    "ja": "日文",
+    "ko": "韩文",
+    "fr": "法文",
+    "de": "德文",
+    "es": "西班牙文",
+    "ru": "俄文",
+    "zh": "中文",
+}
+
+
+def _get_lang_name(source_lang: str) -> str:
+    """将语言代码转换为中文名称，未知代码直接返回原值。"""
+    return _LANG_NAMES.get(source_lang.lower(), source_lang)
+
+
 _SYSTEM_PROMPT_TEMPLATE = """\
-你是一名专业的同人文翻译，将英文同人文翻译为简体中文。翻译要求：
+你是一名专业的同人文翻译，将{source_lang}同人文翻译为简体中文。翻译要求：
 1. 忠实原文，不增减内容，保留原文的语气和风格
 2. 对话部分使用中文引号「」（除非原文整体风格更适合用""）
 3. 人称代词根据上下文性别准确翻译
@@ -82,7 +101,7 @@ _SYSTEM_PROMPT_TEMPLATE = """\
 """
 
 _SYSTEM_PROMPT_NO_TERMS = """\
-你是一名专业的同人文翻译，将英文同人文翻译为简体中文。翻译要求：
+你是一名专业的同人文翻译，将{source_lang}同人文翻译为简体中文。翻译要求：
 1. 忠实原文，不增减内容，保留原文的语气和风格
 2. 对话部分使用中文引号「」（除非原文整体风格更适合用""）
 3. 人称代词根据上下文性别准确翻译
@@ -93,13 +112,14 @@ _SYSTEM_PROMPT_NO_TERMS = """\
 """
 
 
-def _build_system_prompt(term_map: dict[str, str]) -> str:
-    """根据词典构建系统提示词。词典为空时使用无术语表的简化版本。"""
+def _build_system_prompt(term_map: dict[str, str], source_lang: str = "en") -> str:
+    """根据词典和源语言构建系统提示词。词典为空时使用无术语表的简化版本。"""
+    lang_name = _get_lang_name(source_lang)
     if not term_map:
-        return _SYSTEM_PROMPT_NO_TERMS
+        return _SYSTEM_PROMPT_NO_TERMS.format(source_lang=lang_name)
 
     term_lines = "\n".join(f"  {orig} -> {trans}" for orig, trans in term_map.items())
-    return _SYSTEM_PROMPT_TEMPLATE.format(term_list=term_lines)
+    return _SYSTEM_PROMPT_TEMPLATE.format(source_lang=lang_name, term_list=term_lines)
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +296,7 @@ def translate_blocks(
     term_map: dict[str, str] | None = None,
     agent: str = "translator",
     progress_path: str | Path | None = None,
+    source_lang: str = "en",
 ) -> None:
     """
     对 TranslatableBlock 列表进行翻译，就地填充每个 block 的 translation 字段。
@@ -286,6 +307,7 @@ def translate_blocks(
     term_map      : 合并后的术语映射 {原文: 译文}，注入系统提示词
     agent         : 使用的 agent 名称（对应 config.json 中的配置）
     progress_path : 断点续传文件路径（_ato3_progress.json），None 则不使用断点续传
+    source_lang   : 源语言代码（如 "en"、"ja"），用于提示词中描述源文语言
 
     说明
     ----
@@ -306,8 +328,23 @@ def translate_blocks(
         )
     client, agent_cfg = get_client(agent)
 
-    # 构建系统提示词（包含术语表）
-    system_prompt = _build_system_prompt(term_map)
+    # 构建系统提示词（优先使用 config.json 中的自定义提示词）
+    custom_prompt: str | None = None
+    try:
+        if _get_agent_config is not None:
+            _cfg = _get_agent_config(agent)
+            custom_prompt = _cfg.get("system_prompt") or None
+    except Exception:
+        pass
+    if custom_prompt:
+        # 自定义提示词：追加术语表（若有），不替换整个提示词
+        if term_map:
+            term_lines = "\n".join(f"  {orig} -> {trans}" for orig, trans in term_map.items())
+            system_prompt = custom_prompt + f"\n\n以下术语必须严格按照指定译名翻译，不得更改：\n{term_lines}"
+        else:
+            system_prompt = custom_prompt
+    else:
+        system_prompt = _build_system_prompt(term_map, source_lang=source_lang)
 
     # 断点续传：恢复已翻译内容
     if progress_path is not None:
@@ -348,11 +385,12 @@ def translate_work(
     term_map: dict[str, str] | None = None,
     agent: str = "translator",
     progress_path: str | Path | None = None,
+    source_lang: str = "en",
 ) -> None:
     """
     translate_blocks 的别名，供 main.py 调用（接口与计划书一致）。
     """
-    translate_blocks(blocks, term_map=term_map, agent=agent, progress_path=progress_path)
+    translate_blocks(blocks, term_map=term_map, agent=agent, progress_path=progress_path, source_lang=source_lang)
 
 
 # ---------------------------------------------------------------------------

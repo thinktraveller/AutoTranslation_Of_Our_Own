@@ -38,9 +38,10 @@ if TYPE_CHECKING:
 # get_client 在模块顶层引用，使 patch("term_extractor.get_client") 生效。
 # 若 llm_config 或 openai SDK 未安装，延迟到实际调用时再报错。
 try:
-    from .llm_config import get_client
+    from .llm_config import get_client, get_agent_config as _get_agent_config
 except ImportError:
     get_client = None  # type: ignore[assignment]
+    _get_agent_config = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -52,9 +53,9 @@ BATCH_CHAR_LIMIT = 3000
 # LLM 请求失败时的最大重试次数
 MAX_RETRIES = 3
 
-# 术语提取系统提示词
-_SYSTEM_PROMPT = """\
-你是一名专业的同人文翻译助手。请从以下文本中提取所有需要统一译名的术语，包括：
+# 术语提取系统提示词模板（{source_lang} 将在运行时替换为实际语言名）
+_SYSTEM_PROMPT_TEMPLATE = """\
+你是一名专业的同人文翻译助手。请从以下{source_lang}文本中提取所有需要统一译名的术语，包括：
 - 人物名称（主角、配角、提及到的任何角色）
 - 地名、组织名、机构名
 - 该 IP 或同人圈中有约定俗成译名的专有词汇
@@ -65,11 +66,28 @@ _SYSTEM_PROMPT = """\
 2. 推荐的中文译名（suggested_translation）
 3. 简短说明（note）：该术语的身份/含义（一句话即可）
 
-只提取专有名词，不提取普通英语单词。
+只提取专有名词，不提取普通词汇。
 以 JSON 数组格式返回，每项包含字段：original, suggested_translation, note
 若文本中没有需要提取的术语，返回空数组 []
 除 JSON 数组本身外，不要输出任何其他内容。\
 """
+
+# 源语言代码到中文名称的映射（用于提示词中的自然语言描述）
+_LANG_NAMES: dict[str, str] = {
+    "en": "英文",
+    "ja": "日文",
+    "ko": "韩文",
+    "fr": "法文",
+    "de": "德文",
+    "es": "西班牙文",
+    "ru": "俄文",
+    "zh": "中文",
+}
+
+
+def _get_lang_name(source_lang: str) -> str:
+    """将语言代码转换为中文名称，未知代码直接返回原值。"""
+    return _LANG_NAMES.get(source_lang.lower(), source_lang)
 
 
 # ---------------------------------------------------------------------------
@@ -88,13 +106,17 @@ class ExtractedTerm:
 # 内部辅助：LLM 调用
 # ---------------------------------------------------------------------------
 
-def _call_llm_for_terms(text: str, client, agent_cfg: dict) -> list[ExtractedTerm]:
+def _call_llm_for_terms(text: str, client, agent_cfg: dict, system_prompt: str | None = None) -> list[ExtractedTerm]:
     """
     向 LLM 发送单批文本，解析并返回术语列表。
     若 LLM 响应格式不合法，打印警告并返回空列表（不抛异常）。
     内置指数退避重试（最多 MAX_RETRIES 次）。
+    system_prompt 为 None 时使用默认英文提示词。
     """
     import time
+
+    if system_prompt is None:
+        system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(source_lang=_get_lang_name("en"))
 
     last_exception = None
     for attempt in range(1, MAX_RETRIES + 1):
@@ -103,7 +125,7 @@ def _call_llm_for_terms(text: str, client, agent_cfg: dict) -> list[ExtractedTer
                 model=agent_cfg["model"],
                 temperature=agent_cfg["temperature"],
                 messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text},
                 ],
             )
@@ -187,6 +209,7 @@ def extract_terms(
     blocks: list,
     existing_terms: dict[str, str] | None = None,
     agent: str = "term_extractor",
+    source_lang: str = "en",
 ) -> list[ExtractedTerm]:
     """
     对文本块列表调用 LLM 进行术语提取。
@@ -196,6 +219,7 @@ def extract_terms(
     blocks        : TranslatableBlock 列表（来自 html_parser）
     existing_terms: 已有词典映射 {原文: 译文}，已存在的词条自动跳过
     agent         : 使用的 agent 名称（对应 config.json 中的配置）
+    source_lang   : 源语言代码（如 "en"、"ja"），用于提示词中描述源文语言
 
     返回
     ----
@@ -223,17 +247,28 @@ def extract_terms(
         print(f"[术语提取] 无法初始化 LLM 客户端：{e}")
         raise
 
+    # 构建本次请求使用的系统提示词（优先使用 config.json 中的自定义提示词）
+    lang_name = _get_lang_name(source_lang)
+    custom_prompt: str | None = None
+    try:
+        if _get_agent_config is not None:
+            _cfg = _get_agent_config(agent)
+            custom_prompt = _cfg.get("system_prompt") or None
+    except Exception:
+        pass
+    system_prompt = custom_prompt if custom_prompt else _SYSTEM_PROMPT_TEMPLATE.format(source_lang=lang_name)
+
     # 将所有块的文本合并，再按 BATCH_CHAR_LIMIT 切分批次
     all_texts = [b.text for b in blocks if b.text.strip()]
     batches = _split_into_batches(all_texts, BATCH_CHAR_LIMIT)
 
     total_batches = len(batches)
-    print(f"[术语提取] 共 {len(all_texts)} 个文本块，分 {total_batches} 批发送给 LLM...")
+    print(f"[术语提取] 共 {len(all_texts)} 个文本块，分 {total_batches} 批发送给 LLM（源语言：{lang_name}）...")
 
     all_terms: list[ExtractedTerm] = []
     for i, batch_text in enumerate(batches, 1):
         print(f"  处理第 {i}/{total_batches} 批（{len(batch_text)} 字符）...", end=" ", flush=True)
-        terms = _call_llm_for_terms(batch_text, client, agent_cfg)
+        terms = _call_llm_for_terms(batch_text, client, agent_cfg, system_prompt=system_prompt)
         print(f"提取到 {len(terms)} 条术语")
         all_terms.extend(terms)
 
@@ -294,35 +329,39 @@ def _split_into_batches(texts: list[str], char_limit: int) -> list[str]:
 # 公开 API：CLI 确认流程
 # ---------------------------------------------------------------------------
 
-def run_cli_confirm(terms: list[ExtractedTerm]) -> dict[str, str]:
+def run_cli_confirm(terms: list[ExtractedTerm]) -> tuple[dict[str, str], dict[str, str]]:
     """
-    逐条在 CLI 中展示术语，让用户决定是否加入词典。
+    逐条在 CLI 中展示术语，让用户决定处理方式。
 
     交互流程（每条术语）：
       1. 展示原文、推荐译名、说明
-      2. 询问：是否加入词典？(y/n/s)
-         - y：加入词典
-         - n：跳过此条（不加入）
+      2. 询问操作：
+         - y：加入词典（持久保存）
+         - t：仅本次使用（写入临时术语表，不存入词典文件）
+         - n：跳过此条
          - s：跳过剩余所有条目（停止确认）
-      3. 若选 y，询问：是否修改译名？
+      3. 若选 y 或 t，询问：是否修改译名？
          - 直接回车：使用推荐译名
          - 输入新译名：使用用户输入的译名
 
     返回
     ----
-    dict[str, str]：用户确认加入的 {原文: 译名} 映射
+    tuple[dict[str, str], dict[str, str]]：
+      - 第一项：用户选 y 的 {原文: 译名} 映射（将写入词典文件）
+      - 第二项：用户选 t 的 {原文: 译名} 映射（仅本次翻译使用，不写入词典）
     """
     if not terms:
         print("[术语确认] 没有需要确认的术语。")
-        return {}
+        return {}, {}
 
     confirmed: dict[str, str] = {}
+    session_terms: dict[str, str] = {}
     total = len(terms)
 
     print()
     print("=" * 60)
     print(f"  术语确认流程（共 {total} 条）")
-    print("  输入 y 加入词典，n 跳过，s 跳过剩余所有条目")
+    print("  [y] 加入词典  [t] 仅本次使用  [n] 跳过  [s] 跳过剩余所有")
     print("=" * 60)
 
     for idx, term in enumerate(terms, 1):
@@ -332,12 +371,12 @@ def run_cli_confirm(terms: list[ExtractedTerm]) -> dict[str, str]:
         if term.note:
             print(f"        说明：{term.note}")
 
-        # 询问是否加入词典
+        # 询问操作
         while True:
-            answer = input("  是否加入词典？(y/n/s): ").strip().lower()
-            if answer in ("y", "n", "s"):
+            answer = input("  操作：[y] 加入词典  [t] 仅本次  [n] 跳过  [s] 跳过全部：").strip().lower()
+            if answer in ("y", "t", "n", "s"):
                 break
-            print("  请输入 y、n 或 s。")
+            print("  请输入 y、t、n 或 s。")
 
         if answer == "s":
             skipped = total - idx
@@ -349,14 +388,21 @@ def run_cli_confirm(terms: list[ExtractedTerm]) -> dict[str, str]:
             print(f"  已跳过：{term.original}")
             continue
 
-        # answer == "y"，询问是否修改译名
+        # answer == "y" 或 "t"，询问是否修改译名
         final_name = _ask_translation(term.suggested_translation)
-        confirmed[term.original] = final_name
-        print(f"  已添加：{term.original}  ->  {final_name}")
+
+        if answer == "y":
+            confirmed[term.original] = final_name
+            print(f"  已添加到词典：{term.original}  ->  {final_name}")
+        else:  # "t"
+            session_terms[term.original] = final_name
+            print(f"  仅本次使用：{term.original}  ->  {final_name}（不写入词典）")
 
     print()
-    print(f"[术语确认] 完成，共确认 {len(confirmed)} 条术语加入词典。")
-    return confirmed
+    print(
+        f"[术语确认] 完成，加入词典 {len(confirmed)} 条，仅本次使用 {len(session_terms)} 条。"
+    )
+    return confirmed, session_terms
 
 
 def _ask_translation(default: str) -> str:
@@ -378,26 +424,29 @@ def extract_and_confirm(
     blocks: list,
     existing_terms: dict[str, str] | None = None,
     agent: str = "term_extractor",
-) -> dict[str, str]:
+    source_lang: str = "en",
+) -> tuple[dict[str, str], dict[str, str]]:
     """
     完整流程：术语提取 + CLI 用户确认。
-    返回用户确认加入词典的 {原文: 译名} 映射。
 
     参数
     ----
     blocks        : TranslatableBlock 列表
     existing_terms: 已有词典映射，用于过滤重复词条
     agent         : LLM agent 名称
+    source_lang   : 源语言代码（如 "en"、"ja"），传递给术语提取提示词
 
     返回
     ----
-    dict[str, str]：用户确认的新词条，调用方负责将其写入词典。
+    tuple[dict[str, str], dict[str, str]]：
+      - 第一项：用户选择写入词典的新词条（调用方负责持久化）
+      - 第二项：用户选择仅本次使用的临时词条（调用方负责合并到 term_map，不写文件）
     """
-    terms = extract_terms(blocks, existing_terms=existing_terms, agent=agent)
+    terms = extract_terms(blocks, existing_terms=existing_terms, agent=agent, source_lang=source_lang)
 
     if not terms:
         print("[术语提取] 未提取到新术语，跳过确认流程。")
-        return {}
+        return {}, {}
 
     return run_cli_confirm(terms)
 
