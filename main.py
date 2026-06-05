@@ -82,7 +82,7 @@ def _best_ip_dict_match(html_full_text: str) -> Path | None:
     3. 取平均频数最高的词典；若最高值 < 1，返回 None。
     4. 返回匹配词典的绝对 Path。
     """
-    index_path = Path("dicts/dict_index.json")
+    index_path = Path(__file__).parent / "dicts" / "dict_index.json"
     if not index_path.exists():
         return None
     try:
@@ -97,7 +97,7 @@ def _best_ip_dict_match(html_full_text: str) -> Path | None:
             continue
         avg = sum(text_lower.count(r.lower()) for r in remarks) / len(remarks)
         if avg > best_score:
-            best_score, best_path = avg, Path("dicts") / rel_path
+            best_score, best_path = avg, Path(__file__).parent / "dicts" / rel_path
     return best_path if best_score >= 1.0 else None
 
 
@@ -750,7 +750,7 @@ def _interactive_input() -> list[str]:
         argv.append('--no-general-dict')
 
     # 8. docx 模板（自动检测默认路径）
-    default_tpl = Path(__file__).parent / 'markdown-to-docx' / 'template.docx'
+    default_tpl = Path(__file__).parent / 'markdown-to-docx' / 'ATO3_template.dotx'
     if default_tpl.exists():
         print(f'  检测到默认 docx 模板：{default_tpl}')
         use_default_tpl = input('使用该模板？[回车使用 / n 跳过 / 输入其他路径]: ').strip()
@@ -1170,7 +1170,11 @@ def main(argv=None) -> int:
     # 7. 输出 txt / Markdown / docx（逐步执行，含两处断点）
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     step('输出文件（txt → 精校断点 → Markdown → 检视断点 → docx）')
-    reference_doc = Path(args.docx_template) if args.docx_template else None
+    if args.docx_template:
+        reference_doc = Path(args.docx_template)
+    else:
+        _default_tpl = Path(__file__).parent / 'markdown-to-docx' / 'ATO3_template.dotx'
+        reference_doc = _default_tpl if _default_tpl.exists() else None
     output_dir = args.output_dir if args.output_dir else None
     output_paths = get_output_paths(html_path, output_dir=output_dir)
     task_state["cache"]["output_dir"] = str(output_paths["txt"].parent)

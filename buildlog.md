@@ -768,3 +768,43 @@ print('dict_index 重建验证通过，条目数:', len(idx['entries']))
 ```
 
 ---
+
+## [2026-06-05 20:29] 修复：词典推断路径类型不一致导致无法匹配
+
+### 问题描述
+- 现象：`_best_ip_dict_match()` 在比对词典路径时，`dict_index.json` 中存储的是绝对路径，而函数内部构造的候选路径为相对路径，导致字符串比较始终不等，IP词典推断功能失效
+- 影响范围：交互式启动时 IP 词典自动推断选择逻辑
+
+### 根本原因
+`_best_ip_dict_match()` 内部用 `os.path.join(base_dir, filename)` 构造的路径为相对路径，而 `dict_index.json` 中写入的词典路径经过 `os.path.abspath()` 处理为绝对路径，两者类型不一致导致匹配失败。
+
+### 修复方案
+在 `_best_ip_dict_match()` 中，将候选路径统一用 `os.path.abspath()` 转换为绝对路径后再进行比对，与索引中存储的格式保持一致。
+
+### 变更文件
+- `main.py`：`_best_ip_dict_match()` 候选路径构造处补加 `os.path.abspath()` 调用
+
+### 验证方法
+交互式启动时选择包含 IP 词典的方案，确认推断菜单能正确高亮匹配的词典条目，不再全部显示为「无匹配」
+
+---
+
+## [2026-06-05 20:29] 修复：默认 docx 模板自动检测路径更新
+
+### 问题描述
+- 现象：`main.py` 原先检测默认模板的路径为项目根目录下的 `ATO3_template.dotx`，用户已将模板文件手动移动至 `markdown-to-docx/ATO3_template.dotx`，导致自动检测失败，每次启动均提示模板未找到
+- 影响范围：docx 输出时的模板自动填充逻辑
+
+### 根本原因
+模板文件实际存放路径与代码中硬编码的检测路径不一致（目录层级差一级）。
+
+### 修复方案
+将 `main.py` 中模板自动检测的默认路径从 `ATO3_template.dotx` 更新为 `markdown-to-docx/ATO3_template.dotx`，与文件实际位置对齐。
+
+### 变更文件
+- `main.py`：模板路径自动检测逻辑中的默认候选路径更新为 `markdown-to-docx/ATO3_template.dotx`
+
+### 验证方法
+交互式启动后进入 docx 输出配置步骤，确认模板路径自动填充为 `markdown-to-docx/ATO3_template.dotx`，无「模板未找到」提示
+
+---
