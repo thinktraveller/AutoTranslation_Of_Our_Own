@@ -43,6 +43,9 @@ dicts/dict_index.json
 
 # 本地文档（不上传）
 docs/
+构建计划书.md
+buildlog.md
+teaching.md
 
 # Claude Code 本地数据
 .claude/
@@ -53,7 +56,8 @@ docs/
 *.swp
 *.swo
 
-# 输出文件（可选：若不希望将译文纳入版本控制）
-# *_translated.txt
-# *_translated.md
-# *_translated.docx
+输出文件（可选：若不希望将译文纳入版本控制）
+*_translated.txt
+*_translated.md
+*_translated.docx
+
